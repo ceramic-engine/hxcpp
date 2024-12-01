@@ -6,9 +6,9 @@
 
 
 <include name="toolchain/gcc-toolchain.xml"/>
-<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.9" if="HXCPP_CPP11||HXCPP_CPP14||HXCPP_CPP17" unless="MACOSX_DEPLOYMENT_TARGET"/>
-<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.7" if="OBJC_ARC" unless="MACOSX_DEPLOYMENT_TARGET" />
-<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.6" unless="MACOSX_DEPLOYMENT_TARGET" />
+<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.10"/><!--<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.9" if="HXCPP_CPP11||HXCPP_CPP14||HXCPP_CPP17" unless="MACOSX_DEPLOYMENT_TARGET"/>-->
+<!--<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.7" if="OBJC_ARC" unless="MACOSX_DEPLOYMENT_TARGET" />-->
+<!--<setenv name="MACOSX_DEPLOYMENT_TARGET" value="10.6" unless="MACOSX_DEPLOYMENT_TARGET" />-->
 <path name="${DEVELOPER_DIR}/usr/bin" />
 <set name="HXCPP_LTO_THIN" value="1" if="HXCPP_OPTIMIZE_LINK_INCREMENTAL"/>
 
@@ -87,7 +87,7 @@
   <flag value="-arch" />
   <flag value="${HXCPP_ARCH}"/>
   <flag value="-framework"/>
-  <flag value="Cocoa"/>
+  <flag value="Cocoa"/><flag value="-mmacosx-version-min=10.10"/>
   <flag value="-isysroot" unless="LEGACY_MACOSX_SDK"/>
   <flag value="${DEVELOPER_DIR}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX${MACOSX_VER}.sdk" unless="LEGACY_MACOSX_SDK"/>
   <flag value="-fvisibility=hidden"/>
@@ -109,7 +109,7 @@
   <mmflag value="-stdlib=libc++" unless="STDLIBCPP" />
   <mmflag value="-stdlib=libstdc++" if="STDLIBCPP" />
   <flag value="-framework"/>
-  <flag value="Cocoa"/>
+  <flag value="Cocoa"/><flag value="-mmacosx-version-min=10.10"/>
   <flag value="-isysroot" unless="LEGACY_MACOSX_SDK"/>
   <flag value="${DEVELOPER_DIR}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX${MACOSX_VER}.sdk" unless="LEGACY_MACOSX_SDK"/>
   <flag value="-fsanitize=thread" if="HXCPP_THREAD_SANITIZE" />
