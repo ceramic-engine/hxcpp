@@ -42,7 +42,7 @@
   <mmflag value="-std=c++17" if="HXCPP_CPP17" />
 
   <flag value="-g" if="HXCPP_DEBUG_LINK"/>
-  <flag value="-O2" unless="debug"/>
+  <flag value="-O2" unless="debug || HXCPP_OPTIM_O1"/><flag value="-O1" if="HXCPP_OPTIM_O1" unless="debug"/>
   <flag value="-arch"/>
   <flag value="armv6" if="HXCPP_ARMV6" />
   <flag value="armv7" if="HXCPP_ARMV7" />

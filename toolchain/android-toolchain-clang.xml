@@ -52,7 +52,7 @@
 
   <pchflag value="-x" />
   <pchflag value="c++-header" />
-  
+
   <!-- Macros -->
   <flag value="-DANDROID=ANDROID"/>
   <flag value="-DHXCPP_CLANG"/>
@@ -71,12 +71,12 @@
   <flag value="-c"/>
   <flag value="-fpic"/>
   <flag value="-O2" unless="debug"/>
-  
+
   <!-- Warning Supression -->
   <flag value="-Wno-invalid-offsetof" />
   <flag value="-Wno-return-type-c-linkage" />
   <flag value="-Wno-parentheses" />
-  
+
 </compiler>
 
 
@@ -90,14 +90,14 @@
   <flag value="-Wl,--no-undefined" unless="HXCPP_ALLOW_UNDEFINED" />
 
   <flag value="-stdlib=libc++" unless="NDKV20+" />
-  <flag value ="-static-libstdc++" />
+  <flag value ="-static-libstdc++" if="HXCPP_LIBCPP_STATIC" />
   <!-- This shows the android link line, which may be so long that it breaks the tool
      https://github.com/HaxeFoundation/hxcpp/pull/1091
      <flag value ="-v" />
   -->
   <prefix value="lib"/>
   <lib name="-llog"/>
-    
+
 </linker>
-    
+
 </xml>
