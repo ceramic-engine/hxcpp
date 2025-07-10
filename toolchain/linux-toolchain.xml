@@ -85,6 +85,7 @@
   <flag value="-rdynamic"/>
   <flag value="-m32" unless="noM32"/>
   <flag value="-m64" if="HXCPP_M64" unless="noM64" />
+  <flag value="-Wl,-rpath=$ORIGIN" if="HXCPP_RPATH_ORIGIN" />
   <lib name="-ldl"/>
   <ext value=""/>
   <outflag value="-o "/>
