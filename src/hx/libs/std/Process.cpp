@@ -1,7 +1,7 @@
 #include <hxcpp.h>
 #include <hx/OS.h>
 
-#if !defined(HX_WINRT) && !defined(EPPC)
+#if !defined(HX_WINRT) && !defined(EPPC) && !defined(HXCPP_NO_SYSTEM)
 
 #ifdef NEKO_WINDOWS
 #   include <windows.h>

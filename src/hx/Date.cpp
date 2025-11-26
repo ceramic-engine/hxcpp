@@ -18,7 +18,7 @@
          #define USE_GETTIMEOFDAY
       #endif
    #endif
-   #if defined(__ORBIS__)
+   #if defined(HXCPP_LOCALTIME_S)
       // fill in for a missing localtime_r with localtime_s
       #define localtime_r localtime_s
       #define gmtime_r gmtime_s
@@ -360,7 +360,7 @@ double __hxcpp_timezone_offset(double inSeconds)
    struct tm localTime;
    __internal_localtime( inSeconds, &localTime);
 
-   #if defined(HX_WINDOWS) || defined(__SNC__) || defined(__ORBIS__)
+   #if defined(HX_WINDOWS) || defined(__SNC__) || defined(HXCPP_NO_TM_GMTOFF)
    struct tm gmTime;
    __internal_gmtime(inSeconds, &gmTime );
 
