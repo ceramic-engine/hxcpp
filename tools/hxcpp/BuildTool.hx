@@ -1707,6 +1707,23 @@ class BuildTool
          a++;
       }
 
+      // Add HXCPP_TARGET_PATHS for external target discovery
+      // Check command-line define first, then fall back to environment variable
+      var hxcppTargetPaths = defines.exists("HXCPP_TARGET_PATHS") ?
+         defines.get("HXCPP_TARGET_PATHS") : Sys.getEnv("HXCPP_TARGET_PATHS");
+      if (hxcppTargetPaths != null && hxcppTargetPaths != "") {
+         // Support both ; and : as separators (: for Unix, ; for Windows)
+         var separator = hxcppTargetPaths.indexOf(";") >= 0 ? ";" : ":";
+         for (targetPath in hxcppTargetPaths.split(separator)) {
+            var trimmed = StringTools.trim(targetPath);
+            if (trimmed != "") {
+               include_path.push(PathManager.standardize(trimmed));
+               // Also set HXCPP_TARGETS for use in toolchain XML files (e.g., -I${HXCPP_TARGETS}/include)
+               defines.set("HXCPP_TARGETS", PathManager.standardize(trimmed));
+            }
+         }
+      }
+
       if (defines.exists("HXCPP_TIMES"))
          Profile.enable();
 
@@ -1968,6 +1985,19 @@ class BuildTool
          defines.set("emcc","emcc");
          defines.set("emscripten","emscripten");
          defines.set("BINDIR","Emscripten");
+      }
+      else if (defines.exists("HXCPP_CUSTOM_TARGET"))
+      {
+         // Custom external target support
+         // Usage: -DHXCPP_CUSTOM_TARGET=mytarget -DHXCPP_CUSTOM_BINDIR=MyTarget
+         // Toolchain loaded from HXCPP_TARGET_PATHS: toolchain/<mytarget>-toolchain.xml
+         var customTarget = defines.get("HXCPP_CUSTOM_TARGET");
+         defines.set("toolchain", customTarget);
+         defines.set(customTarget, customTarget);
+         if (defines.exists("HXCPP_CUSTOM_BINDIR"))
+            defines.set("BINDIR", defines.get("HXCPP_CUSTOM_BINDIR"));
+         else
+            defines.set("BINDIR", customTarget.charAt(0).toUpperCase() + customTarget.substr(1));
       }
       else if (defines.exists("gph"))
       {

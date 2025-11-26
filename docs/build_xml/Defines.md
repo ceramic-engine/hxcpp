@@ -89,3 +89,71 @@ Defines affecting target architecture.
 | *HXCPP_MINGW*           | Compile for windows using mingw |
 | *NO_AUTO_MSVC*          | Do not detect msvc location, use the one already in the executable path |
 | *HXCPP_WINXP_COMPAT*    | Remain compatible with Windows XP. Disables condition variables. No effect on ARM. |
+
+Custom External Target System
+-----------------------------
+
+hxcpp supports loading external target toolchains from a separate folder. This allows console-specific or proprietary toolchains to be maintained separately from the main hxcpp repository.
+
+### Usage
+
+| Define                   | Meaning            |
+|--------------------------|--------------------|
+| *HXCPP_TARGET_PATHS*     | Path(s) to external target folders. Can be set via environment variable or `-D` command-line define. Multiple paths separated by `;` (Windows) or `:` (Unix). Command-line takes precedence over environment variable. |
+| *HXCPP_CUSTOM_TARGET*    | Name of the custom target (e.g., `myconsole`). Sets toolchain to `<target>-toolchain.xml` and creates a define with the target name. |
+| *HXCPP_CUSTOM_BINDIR*    | Output directory name for the custom target. If not specified, capitalizes first letter only (e.g., `mytarget` → `Mytarget`). |
+
+### Example
+
+```bash
+# Using environment variable
+export HXCPP_TARGET_PATHS=/path/to/custom-targets
+haxelib run hxcpp Build.xml -DHXCPP_CUSTOM_TARGET=mytarget
+
+# Using command-line define
+haxelib run hxcpp Build.xml -DHXCPP_TARGET_PATHS=/path/to/custom-targets -DHXCPP_CUSTOM_TARGET=mytarget -DHXCPP_CUSTOM_BINDIR=MyTarget
+```
+
+This looks for `toolchain/mytarget-toolchain.xml` in the paths specified by `HXCPP_TARGET_PATHS`.
+
+### Generic Feature Flags
+
+External toolchains can use these generic flags to disable features not available on their platform. Set these in your custom toolchain XML:
+
+| Define                    | Purpose |
+|---------------------------|---------|
+| *HXCPP_NO_UNISTD*         | Disable `unistd.h`, `dirent.h`, `termios.h` includes |
+| *HXCPP_NO_ENVIRON*        | Disable environment variable access (`getenv`, `environ`) |
+| *HXCPP_NO_LOCALE*         | Disable locale functions (`setlocale`, etc.) |
+| *HXCPP_NO_FILESYSTEM*     | Disable file operations |
+| *HXCPP_NO_SYSTEM*         | Disable `system()` / `sys_command()` |
+| *HXCPP_NO_TERMINAL*       | Disable terminal operations (`getch`, etc.) |
+| *HXCPP_NO_SOCKET*         | Disable socket networking |
+| *HXCPP_NO_DLOPEN*         | Disable dynamic library loading (`dlopen`, etc.) |
+| *HXCPP_NO_TM_GMTOFF*      | Use `mktime`-based GMT offset calculation (when `tm_gmtoff` unavailable) |
+| *HXCPP_TIME_USE_CLOCK*    | Use `clock()` for CPU time instead of `getrusage()` |
+| *HXCPP_LOCALTIME_S*       | Use `localtime_s`/`gmtime_s` instead of `localtime_r`/`gmtime_r` |
+| *HXCPP_PLATFORM_NAME*     | Custom platform name returned by `Sys.systemName()` (e.g., `"MyConsole"`) |
+| *HXCPP_MAIN_ADDON*        | Enable including `<hx/HxcppMainAddon.h>` for platform-specific main() additions |
+| *HXCPP_DEFAULT_STATIC*    | Platform defaults to static linking (sets `static_link` unless `dll_import` or `exe_link` is set) |
+| *HXCPP_DEFAULT_LIBEXTRA*  | Default library filename suffix (e.g., `.mycon` produces `libName.mycon.a`) |
+| *HXCPP_GC_LARGE_DEFAULTS* | Use larger default values for GC memory pools |
+
+### External Target Folder Structure
+
+```
+my-custom-target/
+├── toolchain/
+│   └── mytarget-toolchain.xml    # Toolchain configuration
+├── include/
+│   └── hx/
+│       └── HxcppMainAddon.h      # Platform-specific main() code (optional)
+└── docs/
+    └── MyTarget.md               # Documentation (optional)
+```
+
+A typical toolchain XML may do something like that:
+1. Set required compiler/linker flags
+2. Set generic feature flags as needed
+3. Optionally include `toolchain/gcc-toolchain.xml` or similar base toolchain
+4. Include `toolchain/common-defines.xml` to convert flags to compiler defines

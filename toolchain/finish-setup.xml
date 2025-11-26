@@ -18,6 +18,7 @@
 <set name="static_link" value="1" if="iphonesim" unless="dll_import||exe_link" />
 <set name="static_link" value="1" if="appletvos" unless="dll_import||exe_link" />
 <set name="static_link" value="1" if="appletvsim" unless="dll_import||exe_link" />
+<set name="static_link" value="1" if="HXCPP_DEFAULT_STATIC" unless="dll_import||exe_link" />
 
 <set name="LIBPREFIX" value="lib" if="static_link" unless="STATICLIBPREFIX" />
 <set name="LIBPREFIX" value="${STATICLIBPREFIX}" if="static_link" unless="LIBPREFIX" />
@@ -64,6 +65,7 @@
 <set name="LIBEXTRA" value="-64" if="HXCPP_ARM64" unless="LIBEXTRA||linux||isMsvc||macos" />
 <set name="LIBEXTRA" value="-x86" if="tizen"/>
 <set name="LIBEXTRA" value="" if="tizen" unless="simulator" />
+<set name="LIBEXTRA" value="${HXCPP_DEFAULT_LIBEXTRA}" if="HXCPP_DEFAULT_LIBEXTRA" unless="LIBEXTRA"/>
 <set name="LIBEXT" value=".a" />
 <set name="LIBEXT" value=".lib" if="windows" unless="mingw" />
 

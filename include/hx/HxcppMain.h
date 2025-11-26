@@ -1,3 +1,9 @@
+// External targets can provide platform-specific code via HxcppMainAddon.h
+// Set HXCPP_MAIN_ADDON in toolchain and add include path to addon header
+#if defined(HXCPP_MAIN_ADDON)
+#include <hx/HxcppMainAddon.h>
+#endif
+
 #ifdef HXCPP_DLL_IMPORT
 
    extern "C" EXPORT_EXTRA void __main__()

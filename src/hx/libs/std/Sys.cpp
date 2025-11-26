@@ -20,7 +20,7 @@
    #include <locale.h>
 #else
    #include <errno.h>
-   #ifndef EPPC
+   #if !defined(EPPC) && !defined(HXCPP_NO_UNISTD)
       #include <unistd.h>
       #include <dirent.h>
       #include <termios.h>
@@ -30,7 +30,7 @@
    #include <limits.h>
    #ifndef ANDROID
       #include <locale.h>
-      #if !defined(BLACKBERRY) && !defined(EPPC) && !defined(GCW0) && !defined(__GLIBC__)
+      #if !defined(BLACKBERRY) && !defined(EPPC) && !defined(GCW0) && !defined(__GLIBC__) && !defined(HXCPP_NO_UNISTD)
          #include <xlocale.h>
       #endif
    #endif
@@ -77,7 +77,7 @@
 
 String _hx_std_get_env( String v )
 {
-   #ifdef HX_WINRT
+   #if defined(HX_WINRT) || defined(HXCPP_NO_ENVIRON)
       return String();
    #else
       #if defined(NEKO_WINDOWS) && defined(HX_SMART_STRINGS)
@@ -96,7 +96,7 @@ String _hx_std_get_env( String v )
 **/
 void _hx_std_put_env( String e, String v )
 {
-#ifdef HX_WINRT
+#if defined(HX_WINRT) || defined(HXCPP_NO_ENVIRON)
    // Do nothing
 #elif defined(NEKO_WINDOWS)
    String set = e + HX_CSTRING("=") + (v != null()?v:"");
@@ -153,7 +153,7 @@ void _hx_std_sys_sleep( double f )
 **/
 bool _hx_std_set_time_locale( String l )
 {
-#if defined(ANDROID) || defined(GCW0)
+#if defined(ANDROID) || defined(GCW0) || defined(HXCPP_NO_LOCALE)
     return false;
 #else
 
@@ -190,7 +190,7 @@ String _hx_std_get_cwd()
 {
    #ifdef HX_WINRT
    return HX_CSTRING("ms-appdata:///local/");
-   #elif defined(EPPC)
+   #elif defined(EPPC) || defined(HXCPP_NO_FILESYSTEM)
    return String();
    #else
 #ifdef NEKO_WINDOWS
@@ -224,7 +224,7 @@ String _hx_std_get_cwd()
 **/
 bool _hx_std_set_cwd( String d )
 {
-   #if !defined(HX_WINRT) && !defined(EPPC)
+   #if !defined(HX_WINRT) && !defined(EPPC) && !defined(HXCPP_NO_FILESYSTEM)
 #ifdef NEKO_WINDOWS
    return SetCurrentDirectoryW(d.wchar_str()) == 0;
 #else
@@ -250,7 +250,9 @@ bool _hx_std_set_cwd( String d )
 **/
 String _hx_std_sys_string()
 {
-#if defined(HX_WINRT)
+#if defined(HXCPP_PLATFORM_NAME)
+   return HX_CSTRING(HXCPP_PLATFORM_NAME);
+#elif defined(HX_WINRT)
    return HX_CSTRING("WinRT");
 #elif defined(NEKO_WINDOWS)
    return HX_CSTRING("Windows");
@@ -296,7 +298,7 @@ bool _hx_std_sys_is64()
 **/
 int _hx_std_sys_command( String cmd )
 {
-   #if defined(HX_WINRT) || defined(EMSCRIPTEN) || defined(EPPC) || defined(IPHONE) || defined(APPLETV) || defined(HX_APPLEWATCH)
+   #if defined(HX_WINRT) || defined(EMSCRIPTEN) || defined(EPPC) || defined(IPHONE) || defined(APPLETV) || defined(HX_APPLEWATCH) || defined(HXCPP_NO_SYSTEM)
    return -1;
    #else
    if( !cmd.raw_ptr() || !cmd.length )
@@ -372,7 +374,7 @@ bool _hx_std_sys_exists( String path )
 **/
 void _hx_std_file_delete( String path )
 {
-   #ifndef EPPC
+   #if !defined(EPPC) && !defined(HXCPP_NO_FILESYSTEM)
    hx::EnterGCFreeZone();
 
    bool err = false;
@@ -578,8 +580,8 @@ bool _hx_std_sys_create_dir( String path, int mode )
 **/
 void _hx_std_sys_remove_dir( String path )
 {
-   #ifdef EPPC
-   return true;
+   #if defined(EPPC) || defined(HXCPP_NO_FILESYSTEM)
+   return;
    #else
    hx::EnterGCFreeZone();
 
@@ -648,7 +650,7 @@ double _hx_std_sys_cpu_time()
    if( !GetProcessTimes(GetCurrentProcess(),&unused,&unused,&stime,&utime) )
       return 0;
    return ( ((double)(utime.dwHighDateTime+stime.dwHighDateTime)) * 65.536 * 6.5536 + (((double)utime.dwLowDateTime + (double)stime.dwLowDateTime) / 10000000) );
-#elif defined(EPPC)
+#elif defined(EPPC) || defined(HXCPP_TIME_USE_CLOCK)
     return ((double)clock()/(double)CLOCKS_PER_SEC);
 #else
    struct tms t;
@@ -713,7 +715,7 @@ Array<String> _hx_std_sys_read_dir( String p )
          break;
    }
    FindClose(handle);
-#elif !defined(EPPC)
+#elif !defined(EPPC) && !defined(HXCPP_NO_FILESYSTEM)
    const char *name = p.utf8_str();
    hx::EnterGCFreeZone();
    DIR *d = opendir(name);
@@ -755,7 +757,7 @@ String _hx_std_file_full_path( String path )
    if( GetFullPathNameW(path.wchar_str(&wbuf),MAX_PATH+1,buf,NULL) == 0 )
       return null();
    return String::create(buf);
-#elif defined(EPPC)
+#elif defined(EPPC) || defined(HXCPP_NO_FILESYSTEM)
    return path;
 #else
    char buf[PATH_MAX];
@@ -787,7 +789,7 @@ String _hx_std_sys_exe_path()
    if( _NSGetExecutablePath(path, &path_len) )
       return null();
    return String::create(path);
-#elif defined(EPPC)
+#elif defined(EPPC) || defined(HXCPP_NO_FILESYSTEM)
    return HX_CSTRING("");
 #else
    {
@@ -824,7 +826,7 @@ extern char **environ;
 Array<String> _hx_std_sys_env()
 {
    Array<String> result = Array_obj<String>::__new();
-   #ifndef HX_WINRT
+   #if !defined(HX_WINRT) && !defined(HXCPP_NO_ENVIRON)
    char **e = environ;
    while( *e )
    {
@@ -865,7 +867,7 @@ Array<String> _hx_std_sys_env()
 **/
 int _hx_std_sys_getch( bool b )
 {
-#if defined(HX_WINRT) || defined(EMSCRIPTEN) || defined(EPPC)
+#if defined(HX_WINRT) || defined(EMSCRIPTEN) || defined(EPPC) || defined(HXCPP_NO_TERMINAL)
    return 0;
 #elif defined(NEKO_WINDOWS)
    hx::EnterGCFreeZone();
@@ -900,7 +902,7 @@ int _hx_std_sys_get_pid()
 {
 #   ifdef NEKO_WINDOWS
    return (int)(GetCurrentProcessId());
-#elif defined(EPPC)
+#elif defined(EPPC) || defined(HXCPP_NO_FILESYSTEM)
    return (1);
 #   else
    return (getpid());
