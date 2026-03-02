@@ -41,8 +41,11 @@
 
 
 
-<set name="LIBEXTRA" value=".iphonesim-64" if="iphonesim"/>
-<set name="LIBEXTRA" value=".iphonesim" if="iphonesim" unless="HXCPP_M64"/>
+<section if="iphonesim">
+	<set name="LIBEXTRA" value=".iphonesim"/>
+	<set name="LIBEXTRA" value=".iphonesim-64" if="HXCPP_M64"/>
+	<set name="LIBEXTRA" value=".iphonesim-arm64" if="HXCPP_ARM64"/>
+</section>
 <section if="iphoneos">
 	<set name="LIBEXTRA" value=".iphoneos-v7" if="HXCPP_ARMV7"/>
 	<set name="LIBEXTRA" value=".iphoneos-v7s" if="HXCPP_ARMV7S"/>
