@@ -56,9 +56,10 @@
   <flag value="-miphoneos-version-min=${HXCPP_IOS_MIN_VERSION}" if="HXCPP_IOS_MIN_VERSION" />
   <flag value="-fobjc-arc" if="OBJC_ARC" />
   <flag value="-DOBJC_ARC" if="OBJC_ARC" />
-  <flag value="-DENABLE_BITCODE=YES"/>
+  <!-- Bitcode is deprecated since Xcode 14 and prevents symbol renaming with llvm-objcopy -->
+  <!-- <flag value="-DENABLE_BITCODE=YES"/>
   <flag value="-fembed-bitcode" unless="debug" />
-  <flag value="-fembed-bitcode-marker" if="debug" />
+  <flag value="-fembed-bitcode-marker" if="debug" /> -->
   <flag value="-Wno-parentheses" />
   <flag value="-Wno-null-dereference" unless="HXCPP_GCC"/>
   <flag value="-Wno-unused-value" />
