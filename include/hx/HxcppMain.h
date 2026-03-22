@@ -4,6 +4,58 @@
 #include <hx/HxcppMainAddon.h>
 #endif
 
+// On Windows, install a Vectored Exception Handler to write a minidump
+// when the process crashes (e.g. during CRT static destruction at exit).
+// VEH is called before frame-based SEH handlers, so it works even during
+// CRT teardown where SetUnhandledExceptionFilter would not be invoked.
+#if defined(HX_WINDOWS) && !defined(HX_WINRT) && !defined(HXCPP_DLL_IMPORT)
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+static LONG CALLBACK hxcppVEHHandler(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    fprintf(stderr, "HXCPP CRASH: Access violation at address %p\n",
+        ep->ExceptionRecord->ExceptionAddress);
+    fflush(stderr);
+    // Capture stack trace first — CaptureStackBackTrace is a kernel32 function
+    // that doesn't depend on CRT state, so it's more likely to succeed.
+    void* stack[64];
+    USHORT frames = CaptureStackBackTrace(0, 64, stack, NULL);
+    fprintf(stderr, "Stack frames (%d):\n", frames);
+    for (USHORT i = 0; i < frames; i++)
+        fprintf(stderr, "  [%d] %p\n", i, stack[i]);
+    fflush(stderr);
+    // Attempt to write a minidump (depends on dbghelp.dll, may fail during CRT teardown)
+    HANDLE hFile = CreateFileA("crashdumps\\crash.dmp", GENERIC_WRITE, 0,
+        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "Failed to create crash dump file (error %lu)\n", GetLastError());
+        fflush(stderr);
+    } else {
+        MINIDUMP_EXCEPTION_INFORMATION mei;
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = ep;
+        mei.ClientPointers = FALSE;
+        BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+            hFile, (MINIDUMP_TYPE)(MiniDumpWithFullMemory), &mei, NULL, NULL);
+        CloseHandle(hFile);
+        if (ok) {
+            fprintf(stderr, "Minidump written to crashdumps\\crash.dmp\n");
+        } else {
+            fprintf(stderr, "MiniDumpWriteDump failed (error %lu)\n", GetLastError());
+        }
+        fflush(stderr);
+    }
+    // Force exit with error code so CI detects the failure
+    _exit(1);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static struct HxcppCrashHandlerInit {
+    HxcppCrashHandlerInit() { AddVectoredExceptionHandler(1, hxcppVEHHandler); }
+} _hxcppCrashHandlerInit;
+#endif
+
 #ifdef HXCPP_DLL_IMPORT
 
    extern "C" EXPORT_EXTRA void __main__()
