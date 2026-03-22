@@ -43,7 +43,7 @@ namespace hx
 
 enum { gAlwaysMove = true };
 typedef hx::UnorderedSet<void *> PointerMovedSet;
-PointerMovedSet sgPointerMoved;
+HX_IMMORTAL_GLOBAL(PointerMovedSet, sgPointerMoved);
 
 #else
 enum { gAlwaysMove = false };
@@ -575,7 +575,7 @@ typedef hx::QuickVec<hx::Object *> ObjectStack;
 
 typedef HxMutex ThreadPoolLock;
 
-static ThreadPoolLock sThreadPoolLock;
+HX_IMMORTAL(ThreadPoolLock, sThreadPoolLock);
 
 #if !defined(HX_WINDOWS) && !defined(EMSCRIPTEN) && \
    !defined(__SNC__) && !defined(__ORBIS__)
@@ -708,7 +708,7 @@ struct GroupInfo
 
 };
  
-hx::QuickVec<GroupInfo> gAllocGroups;
+HX_IMMORTAL_GLOBAL(hx::QuickVec<GroupInfo>, gAllocGroups);
 
 
 
@@ -1797,7 +1797,7 @@ struct GlobalChunks
 
 };
 
-GlobalChunks sGlobalChunks;
+HX_IMMORTAL_GLOBAL(GlobalChunks, sGlobalChunks);
 
 class MarkContext
 {
@@ -2390,7 +2390,7 @@ void MarkStringArray(String *inPtr, int inLength, hx::MarkContext *__inCtx)
 
 FILE_SCOPE HxMutex *sGCRootLock = 0;
 typedef hx::UnorderedSet<hx::Object **> RootSet;
-static RootSet sgRootSet;
+HX_IMMORTAL(RootSet, sgRootSet);
 
 typedef hx::UnorderedMap<void *,int> OffsetRootSet;
 static OffsetRootSet *sgOffsetRootSet=0;
@@ -2439,7 +2439,7 @@ class WeakRef;
 typedef hx::QuickVec<WeakRef *> WeakRefs;
 
 FILE_SCOPE HxMutex *sFinalizerLock = 0;
-FILE_SCOPE WeakRefs sWeakRefs;
+HX_IMMORTAL(WeakRefs, sWeakRefs);
 
 class WeakRef : public hx::Object
 {
@@ -2473,26 +2473,26 @@ typedef hx::QuickVec<InternalFinalizer *> FinalizerList;
 FILE_SCOPE FinalizerList *sgFinalizers = 0;
 
 typedef hx::UnorderedMap<hx::Object *,hx::finalizer> FinalizerMap;
-FILE_SCOPE FinalizerMap sFinalizerMap;
+HX_IMMORTAL(FinalizerMap, sFinalizerMap);
 
 typedef void (*HaxeFinalizer)(Dynamic);
 typedef hx::UnorderedMap<hx::Object *,HaxeFinalizer> HaxeFinalizerMap;
-FILE_SCOPE HaxeFinalizerMap sHaxeFinalizerMap;
+HX_IMMORTAL(HaxeFinalizerMap, sHaxeFinalizerMap);
 
-hx::QuickVec<int> sFreeObjectIds;
+HX_IMMORTAL_GLOBAL(hx::QuickVec<int>, sFreeObjectIds);
 typedef hx::UnorderedMap<hx::Object *,int> ObjectIdMap;
 typedef hx::QuickVec<hx::Object *> IdObjectMap;
-FILE_SCOPE ObjectIdMap sObjectIdMap;
-FILE_SCOPE IdObjectMap sIdObjectMap;
+HX_IMMORTAL(ObjectIdMap, sObjectIdMap);
+HX_IMMORTAL(IdObjectMap, sIdObjectMap);
 
 typedef hx::UnorderedSet<hx::Object *> MakeZombieSet;
-FILE_SCOPE MakeZombieSet sMakeZombieSet;
+HX_IMMORTAL(MakeZombieSet, sMakeZombieSet);
 
 typedef hx::QuickVec<hx::Object *> ZombieList;
-FILE_SCOPE ZombieList sZombieList;
+HX_IMMORTAL(ZombieList, sZombieList);
 
 typedef hx::QuickVec<hx::HashRoot *> WeakHashList;
-FILE_SCOPE WeakHashList sWeakHashList;
+HX_IMMORTAL(WeakHashList, sWeakHashList);
 
 
 InternalFinalizer::InternalFinalizer(hx::Object *inObj, finalizer inFinalizer)
@@ -2620,7 +2620,7 @@ struct Finalizable
    }
 };
 typedef hx::QuickVec< Finalizable > FinalizableList;
-FILE_SCOPE FinalizableList sFinalizableList;
+HX_IMMORTAL(FinalizableList, sFinalizableList);
 
 
 static double tFinalizers;

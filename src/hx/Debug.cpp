@@ -45,9 +45,9 @@ namespace hx
 const char* EXTERN_CLASS_NAME = "extern";
 
 #ifdef HXCPP_STACK_IDS
-static HxMutex sStackMapMutex;
+HX_IMMORTAL(HxMutex, sStackMapMutex);
 typedef UnorderedMap<int, StackContext *> StackMap;
-static StackMap sStackMap;
+HX_IMMORTAL(StackMap, sStackMap);
 #endif
 
 // User settable String->Void
