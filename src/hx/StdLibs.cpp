@@ -748,7 +748,7 @@ Dynamic __hxcpp_create_var_args(Dynamic &inArrayFunc)
 
 
 
-static HxMutex sgFieldMapMutex;
+HX_IMMORTAL(HxMutex, sgFieldMapMutex);
 
 typedef std::map<std::string,int> StringToField;
 

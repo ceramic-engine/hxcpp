@@ -6,7 +6,7 @@
 DECLARE_TLS_DATA(class hxThreadInfo, tlsCurrentThread);
 
 // g_threadInfoMutex allows atomic access to g_nextThreadNumber
-static HxMutex g_threadInfoMutex;
+HX_IMMORTAL(HxMutex, g_threadInfoMutex);
 // Thread number 0 is reserved for the main thread
 static int g_nextThreadNumber = 1;
 
