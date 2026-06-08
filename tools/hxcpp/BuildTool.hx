@@ -2225,21 +2225,32 @@ class BuildTool
          var dev_path = defines.get("DEVELOPER_DIR") + "/Platforms/MacOSX.platform/Developer/SDKs/";
          if (FileSystem.exists(dev_path))
          {
-            var best="0.0";
+            // Pick the highest full SDK version (e.g. "26.2"), independent of
+            // directory order. Xcode 26 added a major-only alias (MacOSX26.sdk)
+            // next to the full MacOSX26.2.sdk, but "macosx26" is not a canonical
+            // SDK name for xcrun, so we must compare versions numerically and
+            // keep the most specific one.
+            var best = "";
+            var bestMajor = -1.0, bestMinor = -1.0;
             var files = FileSystem.readDirectory(dev_path);
-            var extract_version = ~/^MacOSX(.*).sdk$/;
+            var extract_version = ~/^MacOSX([0-9.]+)\.sdk$/;
             for(file in files)
             {
                if (extract_version.match(file))
                {
                   var ver = extract_version.matched(1);
-                  var split_best = best.split(".");
-                  var split_ver = ver.split(".");
-                  if (Std.parseFloat(split_ver[0]) > Std.parseFloat(split_best[0]) || Std.parseFloat(split_ver[1]) > Std.parseFloat(split_best[1]))
+                  var parts = ver.split(".");
+                  var major = Std.parseFloat(parts[0]);
+                  var minor = parts.length > 1 ? Std.parseFloat(parts[1]) : 0.0;
+                  if (major > bestMajor || (major == bestMajor && minor > bestMinor))
+                  {
+                     bestMajor = major;
+                     bestMinor = minor;
                      best = ver;
+                  }
                }
             }
-            if (best!="0.0")
+            if (best != "")
                defines.set("MACOSX_VER",best);
             else
                Log.v("Could not find MACOSX_VER!");
