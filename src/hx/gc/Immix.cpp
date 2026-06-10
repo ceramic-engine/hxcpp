@@ -67,6 +67,34 @@ enum { gAlwaysMove = false };
 
 #include <hx/QuickVec.h>
 
+#ifdef HXCPP_FUTURE_GC
+#include <atomic>
+#include <chrono>
+#endif
+
+#ifdef HXCPP_TRACY
+// Visualise GC activity in the tracy profiler:
+//  red zones    = stop-the-world work (all mutators paused)
+//  orange zones = concurrent collector work (mutators running)
+//  yellow zones = mutators waiting on the collector
+#include <hx/TelemetryTracy.h>
+#define HX_GC_TRACY_ZONE_STW(name)        ZoneScopedNC(name, 0xbb3322)
+#define HX_GC_TRACY_ZONE_CONCURRENT(name) ZoneScopedNC(name, 0xcc8833)
+#define HX_GC_TRACY_ZONE_WAIT(name)       ZoneScopedNC(name, 0xaaaa33)
+#define HX_GC_TRACY_TEXT(txt)             ZoneText(txt, strlen(txt))
+#define HX_GC_TRACY_PLOT(name,val)        TracyPlot(name, val)
+#define HX_GC_TRACY_THREAD(name)          tracy::SetThreadName(name)
+#define HX_GC_TRACY_MESSAGE(msg)          TracyMessageL(msg)
+#else
+#define HX_GC_TRACY_ZONE_STW(name)
+#define HX_GC_TRACY_ZONE_CONCURRENT(name)
+#define HX_GC_TRACY_ZONE_WAIT(name)
+#define HX_GC_TRACY_TEXT(txt)
+#define HX_GC_TRACY_PLOT(name,val)
+#define HX_GC_TRACY_THREAD(name)
+#define HX_GC_TRACY_MESSAGE(msg)
+#endif
+
 // #define HXCPP_GC_BIG_BLOCKS
 
 
@@ -241,8 +269,14 @@ enum GcMode
    gcmGenerational,
 };
 
+#ifdef HXCPP_FUTURE_GC
+// The write barriers must stay armed from the very start so a concurrent
+//  cycle can always rely on a valid remembered set
+static GcMode sGcMode = gcmGenerational;
+#else
 // Start with full gc - since all objects will be new
 static GcMode sGcMode = gcmFull;
+#endif
 
 
 
@@ -571,6 +605,82 @@ void CriticalGCError(const char *inMessage)
 
 enum AllocType { allocNone, allocString, allocObject, allocMarked };
 
+#ifdef HXCPP_FUTURE_GC
+
+// ---  HXCPP_FUTURE_GC state --------------------------------------------
+//
+// Mostly-concurrent major collections.  A cycle is started inside the pause
+//  of a normal generational (minor) collect:
+//    - mark ids are flipped, so every existing object becomes "white"
+//    - roots/statics/stacks are scanned and pushed (not recursed)
+//    - gFutureGcMarkActive is set: write barriers switch to shading stored
+//      values, allocation switches to allocate-black
+//  A coordinator thread then drains the mark queue with the existing worker
+//  pool while the mutators keep running, and finishes with a short
+//  stop-the-world "remark" pause (root re-scan + residual queue + sweep prep).
+//
+// Row marks made by concurrent marking go to a "shadow" slab so that the
+//  primary row marks - which allocation holes and lazy reclaim are computed
+//  from - stay stable for the whole cycle.  They are copied into place
+//  during the remark pause.
+
+namespace hx { int gFutureGcMarkActive = 0; }
+
+// Set while a cycle (concurrent mark + remark) is in flight.  Transitions
+//  only happen while the world is stopped.
+static volatile int sgFutureCycleActive = 0;
+static volatile int sgFutureCycleGen = 0;
+static volatile bool sgFutureAccelerate = false;
+static bool sgFutureCoordinatorStarted = false;
+
+static std::mutex *sgFutureLock = 0;
+static std::condition_variable *sgFutureWake = 0;
+
+static unsigned char *sgFutureShadowRows = 0;
+static int sgFutureShadowCapacity = 0;
+
+// Chunks of objects that need a consistent re-scan in the remark pause
+static volatile hx::MarkChunk *sgFutureDirtyList = 0;
+
+static int sgFutureMarkThreads = 2;
+static bool sgFutureHadFirstCollect = false;
+// Heap may grow this far between collects (live bytes + nursery budget).
+// Bigger budget = fewer minor collects; survivors, not nursery size, drive
+//  the minor pause time, so this mostly trades memory for throughput.
+static size_t sgFutureNurseryBudget = 32*1024*1024;
+static volatile size_t sgFutureGrowthCap = 0;
+static bool sgFutureVerbose = false;
+// Set during the remark pause: per-block jobs copy shadow row marks into
+//  place before counting/reclaiming
+static bool sgFutureSwapShadow = false;
+
+// Pause/cycle statistics (milliseconds)
+static volatile int sgFutureCycleCount = 0;
+static double sgFutureLastRemarkMs = 0;
+static double sgFutureMaxRemarkMs = 0;
+static double sgFutureLastCycleMs = 0;
+static double sgFutureTriggerRatio = 0.7;
+
+static inline unsigned char *FutureShadowRow(size_t inPtr)
+{
+   int blockId = *(BlockIdType *)(inPtr & IMMIX_BLOCK_BASE_MASK);
+   return sgFutureShadowRows + (size_t)blockId*IMMIX_LINES +
+            ((inPtr & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
+}
+
+static inline unsigned char FutureAtomicOrByte(volatile unsigned char *ioPtr, unsigned char inBits)
+{
+   #ifdef _MSC_VER
+   return (unsigned char)_InterlockedOr8((volatile char *)ioPtr, (char)inBits);
+   #else
+   return __atomic_fetch_or(ioPtr, inBits, __ATOMIC_RELAXED);
+   #endif
+}
+
+static void FutureGcWaitForCycle(bool inLocked);
+
+#endif // HXCPP_FUTURE_GC
+
 struct BlockDataInfo *gBlockStack = 0;
 typedef hx::QuickVec<hx::Object *> ObjectStack;
 
@@ -841,6 +951,14 @@ struct BlockDataInfo
          for(int i=0;i<mHoles;i++)
              ZERO_MEM( (char *)mPtr+mRanges[i].start, mRanges[i].length );
          mZeroed = ZEROED_THREAD;
+
+         #ifdef HXCPP_FUTURE_GC
+         // The concurrent marker may racily follow freshly stored pointers
+         //  into this block.  Make sure it can never observe pre-zero
+         //  garbage at a new allocation site.
+         if (hx::gFutureGcMarkActive)
+            std::atomic_thread_fence(std::memory_order_release);
+         #endif
       }
       mZeroLock = 0;
       return doZero;
@@ -900,8 +1018,22 @@ struct BlockDataInfo
    }
    #endif
 
+   #ifdef HXCPP_FUTURE_GC
+   inline void futureSwapShadowRows()
+   {
+      memcpy( mPtr->mRowMarked + IMMIX_HEADER_LINES,
+              sgFutureShadowRows + (size_t)mId*IMMIX_LINES + IMMIX_HEADER_LINES,
+              IMMIX_USEFUL_LINES );
+   }
+   #endif
+
    void countRows(BlockDataStats &outStats)
    {
+      #ifdef HXCPP_FUTURE_GC
+      if (sgFutureSwapShadow)
+         futureSwapShadowRows();
+      #endif
+
       unsigned char *rowMarked = mPtr->mRowMarked;
       unsigned int *rowTotals = ((unsigned int *)rowMarked) + 1;
 
@@ -972,13 +1104,26 @@ struct BlockDataInfo
       }
 
       int left = (IMMIX_USEFUL_LINES - mUsedRows) << IMMIX_LINE_BITS;
+      #ifdef HXCPP_FUTURE_GC
+      // Optimistic upper bound - reclaim() recomputes the true hole size
+      //  before the block is used.  Without this the cached value decays
+      //  monotonically between (rare) full reclaims and the free list
+      //  starves, thrashing minor collects.
+      mMaxHoleSize = left;
+      #else
       if (left<mMaxHoleSize)
          mMaxHoleSize = left;
+      #endif
    }
 
    template<bool FULL>
    void reclaim(BlockDataStats *outStats)
    {
+      #ifdef HXCPP_FUTURE_GC
+      if (sgFutureSwapShadow)
+         futureSwapShadowRows();
+      #endif
+
       HoleRange *ranges = mRanges;
       ranges[0].length = 0;
       mZeroed = ZEROED_NOT;
@@ -1780,6 +1925,93 @@ struct GlobalChunks
 
 GlobalChunks sGlobalChunks;
 
+#ifdef HXCPP_FUTURE_GC
+
+static void FutureGcPushDirtyChunk(MarkChunk *inChunk)
+{
+   while(true)
+   {
+      MarkChunk *head = (MarkChunk *)sgFutureDirtyList;
+      inChunk->next = head;
+      if (_hx_atomic_compare_exchange_cast_ptr(&sgFutureDirtyList, head, inChunk) == head)
+         return;
+   }
+}
+
+// Dijkstra-style barrier: called by the mutator when it stores a pointer to
+//  an unmarked, non-const allocation while concurrent marking is running.
+// Marking on the mutator side and handing the object to the markers through
+//  the chunk lists (which use acquire/release CAS) means the markers always
+//  observe fully initialised contents.
+void FutureGcShade(void *inValue, hx::StackContext *inCtx)
+{
+   unsigned int header = ((unsigned int *)inValue)[-1];
+   if (header & HX_GC_CONST_ALLOC_BIT)
+      return;
+   // A zero mark byte can only be a stale view of an object that was
+   //  allocated black during this cycle - it is already live.
+   if (!(header & 0xff000000))
+      return;
+   if ( (int)((header>>24) & FULL_MARK_BYTE_MASK) == (gByteMarkID & FULL_MARK_BYTE_MASK) )
+      return;
+
+   ((unsigned char *)inValue)[HX_ENDIAN_MARK_ID_BYTE] = (unsigned char)gByteMarkID;
+
+   int rows = header & IMMIX_ALLOC_ROW_COUNT;
+   if (rows)
+   {
+      unsigned char *rowMark = FutureShadowRow( ((size_t)inValue) - sizeof(int) );
+      for(int r=0;r<rows;r++)
+         rowMark[r] = 1;
+   }
+
+   if (header & IMMIX_ALLOC_IS_CONTAINER)
+      inCtx->pushReferrer( (hx::Object *)inValue );
+}
+
+// Queue inObj for a consistent re-scan during the remark pause.  Used when
+//  pointers may have been copied into inObj without per-value barriers.
+void FutureGcDirtyObject(hx::Object *inObj, hx::StackContext *inCtx)
+{
+   volatile unsigned char *markPtr = ((volatile unsigned char *)inObj) + HX_ENDIAN_MARK_ID_BYTE;
+   unsigned char prev = FutureAtomicOrByte(markPtr, HX_GC_REMEMBERED);
+   if (prev & (HX_GC_REMEMBERED|HX_GC_CONST_ALLOC_MARK_BIT))
+      return;
+
+   MarkChunk *chunk = inCtx->mFutureDirty;
+   if (!chunk)
+      inCtx->mFutureDirty = chunk = sGlobalChunks.alloc();
+   chunk->push(inObj);
+   if (chunk->count==MarkChunk::SIZE)
+   {
+      FutureGcPushDirtyChunk(chunk);
+      inCtx->mFutureDirty = sGlobalChunks.alloc();
+   }
+}
+
+// Allocate-black: write a fully marked header so objects created during the
+//  cycle can never be swept, and the marker never needs to inspect them.
+void FutureGcAllocBlackHeader(hx::ImmixAllocator *inAlloc, unsigned char *inBuffer, int inSize, bool inContainer)
+{
+   int start = (int)(inBuffer - inAlloc->allocBase) - (int)sizeof(int);
+   int startRow = start>>IMMIX_LINE_BITS;
+   int endRow = (start + (int)sizeof(int) + inSize + IMMIX_LINE_LEN-1)>>IMMIX_LINE_BITS;
+
+   ((unsigned int *)inBuffer)[-1] = (endRow-startRow) |
+                                    (inSize<<IMMIX_ALLOC_SIZE_SHIFT) |
+                                    (inContainer ? gMarkIDWithContainer : gMarkID);
+
+   // This block is owned by the allocating thread, no need for atomics
+   inAlloc->allocStartFlags[ startRow ] |= gImmixStartFlag[start & 127];
+
+   unsigned char *rowMark = FutureShadowRow( ((size_t)inBuffer) - sizeof(int) );
+   int rows = endRow-startRow;
+   for(int r=0;r<rows;r++)
+      rowMark[r] = 1;
+}
+
+#endif // HXCPP_FUTURE_GC
+
 class MarkContext
 {
     #ifdef HXCPP_DEBUG
@@ -2035,6 +2267,13 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
    #ifdef HXCPP_GC_NURSERY
    if (!(flags & 0xff000000))
    {
+      #ifdef HXCPP_FUTURE_GC
+      // While a concurrent cycle runs there are no live nursery allocs - this
+      //  is either dead, or a stale view of an allocate-black object
+      if (hx::gFutureGcMarkActive)
+         return;
+      #endif
+
       #ifdef HX_GC_VERIFY_GENERATIONAL
       if (sGcVerifyGenerational)
       {
@@ -2095,6 +2334,10 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
 
       char *block = (char *)(ptr_i & IMMIX_BLOCK_BASE_MASK);
       char *rowMark = block + ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
+      #ifdef HXCPP_FUTURE_GC
+      if (hx::gFutureGcMarkActive)
+         rowMark = (char *)FutureShadowRow(ptr_i);
+      #endif
       *rowMark = 1;
       if (rows>1)
       {
@@ -2122,6 +2365,13 @@ void MarkObjectAllocUnchecked(hx::Object *inPtr,hx::MarkContext *__inCtx)
    #ifdef HXCPP_GC_NURSERY
    if (!(flags & 0xff000000))
    {
+      #ifdef HXCPP_FUTURE_GC
+      // While a concurrent cycle runs there are no live nursery objects - this
+      //  is either dead, or a stale view of an allocate-black object
+      if (hx::gFutureGcMarkActive)
+         return;
+      #endif
+
       #if defined(HX_GC_VERIFY_GENERATIONAL)
          if (sGcVerifyGenerational)
          {
@@ -2160,6 +2410,10 @@ void MarkObjectAllocUnchecked(hx::Object *inPtr,hx::MarkContext *__inCtx)
    {
       char *block = (char *)(ptr_i & IMMIX_BLOCK_BASE_MASK);
       char *rowMark = block + ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
+      #ifdef HXCPP_FUTURE_GC
+      if (hx::gFutureGcMarkActive)
+         rowMark = (char *)FutureShadowRow(ptr_i);
+      #endif
       #if HXCPP_GC_DEBUG_LEVEL>0
       if ( ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS) + rows > IMMIX_LINES) DebuggerTrap();
       #endif
@@ -3226,6 +3480,11 @@ public:
          #ifdef SHOW_MEM_EVENTS
          //GCLOG("Large alloc causing collection");
          #endif
+         #ifdef HXCPP_FUTURE_GC
+         if (sgFutureCycleActive)
+            sgFutureAccelerate = true;   // keep allocating; remark sweeps large objects
+         else
+         #endif
          CollectFromThisThread(false,false);
       }
 
@@ -3296,7 +3555,12 @@ public:
 
       result[0] = inSize;
       #ifdef HXCPP_GC_NURSERY
-      result[1] = 0;
+         #ifdef HXCPP_FUTURE_GC
+         // Allocate black while concurrent marking runs
+         result[1] = hx::gFutureGcMarkActive ? (unsigned int)hx::gMarkID : 0;
+         #else
+         result[1] = 0;
+         #endif
       #else
       result[1] = hx::gMarkID;
       #endif
@@ -3329,6 +3593,11 @@ public:
          if (inDelta>0 && (inDelta+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
          {
             //GCLOG("onMemoryChange alloc causing collection");
+            #ifdef HXCPP_FUTURE_GC
+            if (sgFutureCycleActive)
+               sgFutureAccelerate = true;
+            else
+            #endif
             CollectFromThisThread(false,false);
          }
 
@@ -3448,6 +3717,18 @@ public:
    {
       enum { newBlockCount = 1<<(IMMIX_BLOCK_GROUP_BITS) };
 
+      #ifdef HXCPP_FUTURE_GC
+      // The shadow row slab is sized at cycle start - do not allow block ids
+      //  beyond its capacity while concurrent marking is running
+      if (sgFutureCycleActive && gBlockInfo &&
+            gBlockInfo->size() + newBlockCount > sgFutureShadowCapacity)
+      {
+         sgFutureAccelerate = true;
+         outForceCompact = false;
+         return false;
+      }
+      #endif
+
       #ifdef HXCPP_GC_MOVING
       if (!inJustBorrowing)
       {
@@ -3558,7 +3839,13 @@ public:
 
    bool allowMoreBlocks()
    {
-      #ifdef HXCPP_GC_GENERATIONAL
+      #ifdef HXCPP_FUTURE_GC
+      // Allow the heap to grow during warmup (like the classic gcmFull start)
+      //  and while a concurrent cycle is running, so the mutators are never
+      //  forced to wait for the marker
+      return sGcMode==gcmFull || sgFutureCycleActive || !sgFutureHadFirstCollect ||
+               GetWorkingMemory() < sgFutureGrowthCap;
+      #elif defined(HXCPP_GC_GENERATIONAL)
       return sGcMode==gcmFull;
       #else
       return true;
@@ -3603,7 +3890,17 @@ public:
          #endif
 
          bool forceCompact = false;
-         if (!result && allowMoreBlocks() && (!sgInternalEnable || GetWorkingMemory()<sWorkingMemorySize))
+         bool growthOk = !sgInternalEnable || GetWorkingMemory()<sWorkingMemorySize;
+         #ifdef HXCPP_FUTURE_GC
+         if (!growthOk && sgFutureCycleActive)
+         {
+            // Borrow memory rather than stalling this thread until the
+            //  concurrent cycle completes - but ask it to hurry up
+            sgFutureAccelerate = true;
+            growthOk = true;
+         }
+         #endif
+         if (!result && allowMoreBlocks() && growthOk)
          {
             if (AllocMoreBlocks(forceCompact,false))
                result = GetNextFree(inRequiredBytes);
@@ -3614,6 +3911,17 @@ public:
             inAlloc->SetupStackAndCollect(false,forceCompact,true,true);
             result = GetNextFree(inRequiredBytes);
          }
+
+         #ifdef HXCPP_FUTURE_GC
+         if (!result)
+         {
+            // Prefer growing the heap (the concurrent collector will reclaim
+            //  it) over a stop-the-world compaction
+            bool dummyCompact = false;
+            if (AllocMoreBlocks(dummyCompact,false))
+               result = GetNextFree(inRequiredBytes);
+         }
+         #endif
 
          if (!result && !forceCompact)
          {
@@ -4472,6 +4780,12 @@ public:
    {
       hx::MarkContext context(inId);
 
+      #ifdef HXCPP_TRACY
+      char threadName[32];
+      snprintf(threadName,sizeof(threadName),"hxcpp gc worker %d",inId);
+      HX_GC_TRACY_THREAD(threadName);
+      #endif
+
       while(true)
       {
          waitForThreadWake(inId);
@@ -4483,6 +4797,7 @@ public:
 
          if (sgThreadPoolJob==tpjMark)
          {
+            HX_GC_TRACY_ZONE_CONCURRENT("GC mark");
             context.processMarkStack();
          }
          else if (sgThreadPoolJob==tpjAsyncZeroJit)
@@ -4817,6 +5132,17 @@ public:
    {
       PROFILE_COLLECT_SUMMARY_START;
 
+      #ifdef HXCPP_FUTURE_GC
+      // A concurrent cycle is in flight - ask it to finish soon and wait for
+      //  it instead of collecting.  The remark pause rebuilds the free lists,
+      //  so the caller can simply retry its allocation.
+      if (sgFutureCycleActive)
+      {
+         FutureGcWaitForCycle(inLocked);
+         return;
+      }
+      #endif
+
       #ifndef HXCPP_SINGLE_THREADED_APP
       // If we set the flag from 0 -> 0xffffffff then we are the collector
       //  otherwise, someone else is collecting at the moment - so wait...
@@ -4842,6 +5168,12 @@ public:
 
       STAMP(t0)
 
+      HX_GC_TRACY_ZONE_STW("GC collect");
+
+      #ifdef HXCPP_FUTURE_GC
+      double futureT0 = __hxcpp_time_stamp();
+      #endif
+
       // We are the collector - all must wait for us
       LocalAllocator *this_local = 0;
       #ifndef HXCPP_SINGLE_THREADED_APP
@@ -4856,6 +5188,9 @@ public:
       #endif
 
       sgIsCollecting = true;
+      #ifdef HXCPP_FUTURE_GC
+      sgFutureHadFirstCollect = true;
+      #endif
 
       StopThreadJobs(true);
       #ifdef HXCPP_DEBUG
@@ -4910,7 +5245,15 @@ public:
       }
 
       hx::QuickVec<hx::Object *> rememberedSet;
+      #ifdef HXCPP_FUTURE_GC
+      // Majors run concurrently: do a minor collect now, and (maybe) kick off
+      //  a concurrent mark cycle at the end of this pause.  Only an explicit
+      //  compact still uses the classic full stop-the-world path.
+      bool futureWantCycle = inMajor && !inForceCompact;
+      generational = !inForceCompact;
+      #else
       generational = !inMajor && !inForceCompact && sGcMode == gcmGenerational;
+      #endif
       if (sGcMode==gcmGenerational)
       {
          hx::sGlobalChunks.copyPointers(rememberedSet,!generational);
@@ -4951,7 +5294,13 @@ public:
       if (!generational)
          sgTimeToNextTableUpdate--;
 
+      #ifdef HXCPP_FUTURE_GC
+      // Full (table-updating) reclaims happen in the remark pause of
+      //  concurrent cycles - the only classic full collect left is compaction
+      bool full = inForceCompact;
+      #else
       bool full = inMajor || (sgTimeToNextTableUpdate<=0) || inForceCompact;
+      #endif
 
       // Setup memory target ...
       // Count free rows, and prep blocks for sorting
@@ -4984,6 +5333,10 @@ public:
             verifyAllocStart();
             #endif
 
+            #ifdef HXCPP_FUTURE_GC
+            // Old generation needs collecting - run it concurrently
+            futureWantCycle = true;
+            #else
             generational = false;
             MarkAll(generational);
 
@@ -4992,6 +5345,7 @@ public:
 
             stats.clear();
             reclaimBlocks(full,stats);
+            #endif
          }
       }
       else
@@ -5264,6 +5618,12 @@ public:
       double filled_ratio = (double)mRowsInUse/(double)(mAllBlocksCount*IMMIX_USEFUL_LINES);
       double after_gen = filled_ratio + (1.0-filled_ratio)*mGenerationalRetainEstimate;
 
+      #ifdef HXCPP_FUTURE_GC
+      // Stay generational; old-generation pressure starts a concurrent cycle
+      sGcMode = gcmGenerational;
+      if (generational && after_gen >= sgFutureTriggerRatio)
+         futureWantCycle = true;
+      #else
       if (after_gen<0.75)
       {
          sGcMode = gcmGenerational;
@@ -5274,6 +5634,7 @@ public:
          // What was I thinking here?  This breaks #851
          //gByteMarkID |= 0x30;
       }
+      #endif
 
       #ifdef SHOW_MEM_EVENTS
       GCLOG("filled=%.2f%% + estimate = %.2f%% = %.2f%% -> %s\n",
@@ -5284,9 +5645,17 @@ public:
 
       createFreeList();
 
+      #ifdef HXCPP_FUTURE_GC
+      bool futureStartCycle = futureWantCycle && !sgFutureCycleActive &&
+                                sgInternalEnable && !inForceCompact;
+      if (!futureStartCycle)
+         backgroundProcessFreeList(true);
+      // else: the worker pool belongs to the concurrent markers until remark
+      #else
       // This saves some running/stall time, but increases the total CPU usage
       // Delaying it until just before the block is used to improve the cache locality
       backgroundProcessFreeList(true);
+      #endif
 
       mAllBlocksCount   = mAllBlocks.size();
       mCurrentRowsInUse = mRowsInUse;
@@ -5351,6 +5720,24 @@ public:
       __hxt_gc_end();
       #endif
 
+      HX_GC_TRACY_TEXT(generational ? "minor" : "full");
+      HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
+      HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
+
+      #ifdef HXCPP_FUTURE_GC
+      sgFutureGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgFutureNurseryBudget;
+
+      if (futureStartCycle)
+      {
+         HX_GC_TRACY_MESSAGE("GC concurrent cycle starting");
+         FutureGcStartCycleLocked();
+      }
+
+      if (sgFutureVerbose)
+         GCLOG("Future GC: %s pause %.3fms%s\n", generational ? "minor" : "full",
+               (__hxcpp_time_stamp()-futureT0)*1000.0, futureStartCycle ? " (cycle started)" : "");
+      #endif
+
       sgIsCollecting = false;
 
 
@@ -5376,6 +5763,407 @@ public:
 
       PROFILE_COLLECT_SUMMARY_END;
    }
+
+   #ifdef HXCPP_FUTURE_GC
+
+   // Push every root (statics, gc roots, zombies, conservative thread stacks)
+   //  onto the global mark queue without recursing into them.
+   void FutureMarkRoots()
+   {
+      mMarker.init();
+      mMarker.isGenerational = false;
+
+      hx::MarkClassStatics(&mMarker);
+
+      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+      {
+         hx::Object *&obj = **i;
+         if (obj)
+            hx::MarkObjectAlloc(obj , &mMarker );
+      }
+
+      if (hx::sgOffsetRootSet)
+         for(hx::OffsetRootSet::iterator i = hx::sgOffsetRootSet->begin(); i!=hx::sgOffsetRootSet->end(); ++i)
+         {
+            char *ptr = *(char **)(i->first);
+            int offset = i->second;
+            hx::Object *obj = (hx::Object *)(ptr - offset);
+            if (obj)
+               hx::MarkObjectAlloc(obj , &mMarker );
+         }
+
+      for(int i=0;i<hx::sZombieList.size();i++)
+         hx::MarkObjectAlloc(hx::sZombieList[i] , &mMarker );
+
+      for(int i=0;i<mLocalAllocs.size();i++)
+         MarkLocalAlloc(mLocalAllocs[i] , &mMarker);
+
+      mMarker.releaseJobs();
+   }
+
+
+   // Called at the end of a minor collect's pause: flip the mark ids, arm
+   //  the concurrent write barriers and snapshot the roots.  The coordinator
+   //  thread takes over once the world resumes.
+   void FutureGcStartCycleLocked()
+   {
+      // Flip mark ids - every existing allocation becomes "white"
+      hx::gPrevByteMarkID = hx::gByteMarkID;
+      hx::gPrevMarkIdMask = ((~hx::gMarkID) & 0x30000000) | HX_GC_CONST_ALLOC_BIT;
+
+      gByteMarkID = (gByteMarkID + 1) & 0x0f;
+      if (gByteMarkID & 0x1)
+         gByteMarkID |= 0x20;
+      else
+         gByteMarkID |= 0x10;
+
+      hx::gMarkID = gByteMarkID << 24;
+      hx::gMarkIDWithContainer = (gByteMarkID << 24) | IMMIX_ALLOC_IS_CONTAINER;
+      gRememberedByteMarkID = gByteMarkID | HX_GC_REMEMBERED;
+      gBlockStack = 0;
+
+      // Size + zero the shadow row slab, with headroom for heap growth
+      int needed = gBlockInfo ? gBlockInfo->size() : 0;
+      int capacity = needed + needed/2 + (8<<IMMIX_BLOCK_GROUP_BITS);
+      if (capacity > sgFutureShadowCapacity)
+      {
+         if (sgFutureShadowRows)
+            HxFree(sgFutureShadowRows);
+         sgFutureShadowRows = (unsigned char *)HxAlloc( (size_t)capacity * IMMIX_LINES );
+         sgFutureShadowCapacity = capacity;
+      }
+      ZERO_MEM(sgFutureShadowRows, (size_t)sgFutureShadowCapacity * IMMIX_LINES);
+
+      // Arm the concurrent write barriers + allocate-black.  The mutators are
+      //  all stopped at safe points, so they observe this consistently.
+      hx::gFutureGcMarkActive = 1;
+
+      FutureMarkRoots();
+
+      FutureGcEnsureCoordinator();
+
+      {
+         std::lock_guard<std::mutex> l(*sgFutureLock);
+         sgFutureCycleActive = 1;
+         sgFutureWake->notify_all();
+      }
+
+      #ifdef SHOW_MEM_EVENTS
+      GCLOG("Future GC: concurrent cycle started (mark byte %02x)\n", gByteMarkID);
+      #endif
+   }
+
+
+   // The final, short stop-the-world phase of a concurrent cycle: re-scan
+   //  roots and stacks, drain the residual mark queue + dirty objects, run
+   //  finalizers and prepare the heap for reuse (sweep accounting).
+   void FutureRemark()
+   {
+      HX_GC_TRACY_ZONE_STW("GC remark");
+
+      double tLock0 = __hxcpp_time_stamp();
+      gThreadStateChangeLock->lock();
+      _hx_atomic_compare_exchange((volatile int *)&hx::gPauseForCollect, 0, 0xffffffff);
+
+      for(int i=0;i<mLocalAllocs.size();i++)
+         WaitForSafe(mLocalAllocs[i]);
+
+      sgIsCollecting = true;
+
+      #ifdef HXCPP_TELEMETRY
+      __hxt_gc_start();
+      #endif
+
+      // Flush per-thread gray (shade) and dirty chunks
+      for(int i=0;i<mLocalAllocs.size();i++)
+      {
+         hx::StackContext *ctx = (hx::StackContext *)mLocalAllocs[i];
+         if (ctx->mOldReferrers)
+         {
+            if (ctx->mOldReferrers->count)
+               hx::sGlobalChunks.addLocked( ctx->mOldReferrers );
+            else
+               hx::sGlobalChunks.free( ctx->mOldReferrers );
+            ctx->mOldReferrers = 0;
+         }
+         if (ctx->mFutureDirty)
+         {
+            if (ctx->mFutureDirty->count)
+               FutureGcPushDirtyChunk( ctx->mFutureDirty );
+            else
+               hx::sGlobalChunks.free( ctx->mFutureDirty );
+            ctx->mFutureDirty = 0;
+         }
+      }
+
+      double tRoots0 = __hxcpp_time_stamp();
+
+      // Re-scan roots & stacks - catches references that migrated to the
+      //  stack/registers/statics during concurrent marking
+      FutureMarkRoots();
+
+      double tDirty0 = __hxcpp_time_stamp();
+      int dirtyCount = 0;
+
+      // Queue marked dirty objects for a consistent re-scan
+      mMarker.init();
+      mMarker.isGenerational = false;
+      while(sgFutureDirtyList)
+      {
+         hx::MarkChunk *chunk = (hx::MarkChunk *)sgFutureDirtyList;
+         sgFutureDirtyList = chunk->next;
+         chunk->next = 0;
+         for(int i=0;i<chunk->count;i++)
+         {
+            hx::Object *obj = chunk->stack[i];
+            unsigned char &mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
+            if ( (mark & FULL_MARK_BYTE_MASK) == (gByteMarkID & FULL_MARK_BYTE_MASK) )
+            {
+               // Clear the remembered bit and re-scan
+               mark = (unsigned char)gByteMarkID;
+               mMarker.pushObj(obj);
+               dirtyCount++;
+            }
+            // else - was never marked: unreachable at remark = garbage
+         }
+         chunk->count = 0;
+         hx::sGlobalChunks.free(chunk);
+      }
+      mMarker.releaseJobs();
+
+      double tDrain0 = __hxcpp_time_stamp();
+
+      // Drain everything that is left, world stopped, all threads
+      StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
+
+      double tFinal0 = __hxcpp_time_stamp();
+      hx::FindZombies(mMarker);
+      hx::RunFinalizers();
+
+      // Concurrent phase is over
+      hx::gFutureGcMarkActive = 0;
+
+      double tRows0 = __hxcpp_time_stamp();
+
+      // Swap the shadow row marks into place (dead rows drop out here) -
+      //  done per-block inside the threaded countRows/reclaim jobs below
+      sgFutureSwapShadow = true;
+
+      // Periodically do a full reclaim to scrub stale allocStart entries
+      //  before the 4-bit mark id wraps around
+      sgTimeToNextTableUpdate--;
+      bool full = sgTimeToNextTableUpdate<=0;
+      if (full)
+      {
+         #ifdef HXCPP_GC_MOVING
+         sgTimeToNextTableUpdate = 7;
+         #else
+         sgTimeToNextTableUpdate = 15;
+         #endif
+      }
+
+      BlockDataStats stats;
+      if (full)
+         reclaimBlocks(true,stats);
+      else
+         countRows(stats);
+      sgFutureSwapShadow = false;
+
+      mRowsInUse = stats.rowsInUse + stats.fraggedRows;
+      size_t bytesInUse = full ? stats.bytesInUse : (mRowsInUse<<IMMIX_LINE_BITS);
+
+      #ifdef HXCPP_TELEMETRY
+      __hxt_gc_after_mark(gByteMarkID, HX_ENDIAN_MARK_ID_BYTE);
+      #endif
+
+      double tLarge0 = __hxcpp_time_stamp();
+
+      // Sweep large objects
+      for(int i=0;i<largeObjectRecycle.size();i++)
+         HxFree(largeObjectRecycle[i]);
+      largeObjectRecycle.setSize(0);
+
+      size_t recycleRemaining = 0;
+      #ifdef RECYCLE_LARGE
+      recycleRemaining = mLargeAllocForceRefresh;
+      #endif
+
+      int idx = 0;
+      while(idx<mLargeList.size())
+      {
+         unsigned int *blob = mLargeList[idx];
+         if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
+         {
+            unsigned int size = *blob;
+            mLargeAllocated -= size;
+            if (size < recycleRemaining)
+            {
+               recycleRemaining -= size;
+               largeObjectRecycle.push(blob);
+            }
+            else
+               HxFree(blob);
+
+            mLargeList.qerase(idx);
+         }
+         else
+            idx++;
+      }
+
+      // Update memory targets (mirrors the classic full-collect accounting)
+      size_t mem = mRowsInUse<<IMMIX_LINE_BITS;
+      size_t baseMem = full ? bytesInUse : mem;
+      #ifdef HXCPP_GC_DYNAMIC_SIZE
+      size_t targetFree = std::max((size_t)hx::sgMinimumFreeSpace, (size_t)(baseMem * profileCollectSummary.spaceFactor) );
+      #else
+      size_t targetFree = std::max((size_t)hx::sgMinimumFreeSpace, baseMem/100 *hx::sgTargetFreeSpacePercentage );
+      #endif
+      targetFree = std::min(targetFree, (size_t)sgMaximumFreeSpace );
+      sWorkingMemorySize = std::max( mem + targetFree, (size_t)hx::sgMinimumWorkingMemory);
+
+      int blockSize =  mAllBlocks.size()<<IMMIX_BLOCK_BITS;
+      if (blockSize > mLargeAllocSpace)
+         mLargeAllocSpace = blockSize;
+      mLargeAllocForceRefresh = mLargeAllocated + mLargeAllocSpace;
+
+      mTotalAfterLastCollect = MemUsage();
+
+      // After a major, drift the retain estimate back to optimistic
+      mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
+
+      sgFutureGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgFutureNurseryBudget;
+
+      HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
+      HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
+
+      double tFree0 = __hxcpp_time_stamp();
+      createFreeList();
+      backgroundProcessFreeList(true);
+
+      mAllBlocksCount   = mAllBlocks.size();
+      mCurrentRowsInUse = mRowsInUse;
+
+      if (sgFutureVerbose)
+      {
+         double tEnd = __hxcpp_time_stamp();
+         GCLOG("Future GC remark: stop=%.3f roots=%.3f dirty=%.3f(%d) drain=%.3f final=%.3f rows=%.3f large=%.3f free=%.3f ms\n",
+            (tRoots0-tLock0)*1000, (tDirty0-tRoots0)*1000, (tDrain0-tDirty0)*1000, dirtyCount,
+            (tFinal0-tDrain0)*1000, (tRows0-tFinal0)*1000, (tLarge0-tRows0)*1000,
+            (tFree0-tLarge0)*1000, (tEnd-tFree0)*1000);
+      }
+
+      // Re-arm the generational write barrier channels
+      for(int i=0;i<mLocalAllocs.size();i++)
+      {
+         hx::StackContext *ctx = (hx::StackContext *)mLocalAllocs[i];
+         ctx->mOldReferrers = hx::sGlobalChunks.alloc();
+      }
+
+      for(int i=0;i<LOCAL_POOL_SIZE;i++)
+      {
+         LocalAllocator *l = mLocalPool[i];
+         if (l)
+            ClearPooledAlloc(l);
+      }
+
+      #ifdef HXCPP_TELEMETRY
+      __hxt_gc_end();
+      #endif
+
+      #ifdef SHOW_MEM_EVENTS
+      GCLOG("Future GC: cycle complete, %s in use\n", formatBytes(mem).c_str());
+      #endif
+
+      sgIsCollecting = false;
+      sgFutureCycleActive = 0;
+      hx::gPauseForCollect = 0x00000000;
+
+      for(int i=0;i<mLocalAllocs.size();i++)
+      {
+         #ifdef HXCPP_SCRIPTABLE
+         ((hx::StackContext *)mLocalAllocs[i])->byteMarkId = hx::gByteMarkID;
+         #endif
+         ReleaseFromSafe(mLocalAllocs[i]);
+      }
+
+      gThreadStateChangeLock->unlock();
+   }
+
+
+   // Background thread: drives the concurrent mark phase of each cycle
+   void FutureCoordinatorLoop()
+   {
+      HX_GC_TRACY_THREAD("hxcpp gc coordinator");
+
+      while(true)
+      {
+         {
+            std::unique_lock<std::mutex> l(*sgFutureLock);
+            sgFutureWake->wait(l, []() { return sgFutureCycleActive!=0; });
+         }
+
+         double cycleT0 = __hxcpp_time_stamp();
+         HX_GC_TRACY_ZONE_CONCURRENT("GC concurrent cycle");
+
+         // Concurrent mark rounds: let the worker pool drain the queue while
+         //  the mutators keep running and feeding it via the write barriers
+         int quietRounds = 0;
+         while(true)
+         {
+            if (hx::sGlobalChunks.processList)
+            {
+               StartThreadJobs(tpjMark, MAX_GC_THREADS, true, sgFutureMarkThreads);
+               quietRounds = 0;
+               continue;
+            }
+            if (sgFutureAccelerate || ++quietRounds>=3)
+               break;
+            std::this_thread::sleep_for( std::chrono::microseconds(500) );
+         }
+
+         {
+            double remarkT0 = __hxcpp_time_stamp();
+            PROFILE_COLLECT_SUMMARY_START;
+            FutureRemark();
+            PROFILE_COLLECT_SUMMARY_END;
+            double now = __hxcpp_time_stamp();
+            sgFutureLastRemarkMs = (now-remarkT0)*1000.0;
+            if (sgFutureLastRemarkMs>sgFutureMaxRemarkMs)
+               sgFutureMaxRemarkMs = sgFutureLastRemarkMs;
+            sgFutureLastCycleMs = (now-cycleT0)*1000.0;
+            sgFutureCycleCount++;
+            if (sgFutureVerbose)
+               GCLOG("Future GC: cycle %d done - concurrent %.2fms, remark pause %.3fms (max %.3fms), %.1fMB in use\n",
+                     sgFutureCycleCount, sgFutureLastCycleMs-sgFutureLastRemarkMs,
+                     sgFutureLastRemarkMs, sgFutureMaxRemarkMs,
+                     (double)(mRowsInUse<<IMMIX_LINE_BITS)/(1024.0*1024.0));
+         }
+
+         {
+            std::lock_guard<std::mutex> l(*sgFutureLock);
+            sgFutureAccelerate = false;
+            sgFutureCycleGen++;
+            sgFutureWake->notify_all();
+         }
+      }
+   }
+
+   static void SFutureCoordinatorLoop(void *)
+   {
+      sGlobalAlloc->FutureCoordinatorLoop();
+   }
+
+   void FutureGcEnsureCoordinator()
+   {
+      if (!sgFutureCoordinatorStarted)
+      {
+         sgFutureCoordinatorStarted = true;
+         std::thread coordinator( SFutureCoordinatorLoop, (void *)0 );
+         coordinator.detach();
+      }
+   }
+
+   #endif // HXCPP_FUTURE_GC
 
    void reclaimBlocks(bool full, BlockDataStats &outStats)
    {
@@ -5588,6 +6376,46 @@ public:
    LocalAllocator *mLocalPool[LOCAL_POOL_SIZE];
    hx::QuickVec<unsigned int *> largeObjectRecycle;
 };
+
+
+#ifdef HXCPP_FUTURE_GC
+
+// Ask the running concurrent cycle to finish soon and wait (gc-safely) for
+//  its completion.  Used instead of a stop-the-world collect whenever one is
+//  requested while a cycle is in flight.
+static void FutureGcWaitForCycle(bool inLocked)
+{
+   HX_GC_TRACY_ZONE_WAIT("GC wait for cycle");
+
+   int gen = sgFutureCycleGen;
+   {
+      std::lock_guard<std::mutex> l(*sgFutureLock);
+      if (!sgFutureCycleActive)
+         return;
+      sgFutureAccelerate = true;
+      sgFutureWake->notify_all();
+   }
+
+   if (inLocked)
+      gThreadStateChangeLock->unlock();
+
+   // The remark pause needs this thread to be gc-safe while it waits
+   hx::EnterGCFreeZone();
+   {
+      std::unique_lock<std::mutex> l(*sgFutureLock);
+      sgFutureWake->wait(l, [gen]() { return !sgFutureCycleActive || sgFutureCycleGen!=gen; });
+   }
+   hx::ExitGCFreeZone();
+
+   if (inLocked)
+   {
+      hx::EnterGCFreeZone();
+      gThreadStateChangeLock->lock();
+      hx::ExitGCFreeZoneLocked();
+   }
+}
+
+#endif // HXCPP_FUTURE_GC
 
 
 
@@ -5875,6 +6703,16 @@ public:
             hx::sGlobalChunks.free( mOldReferrers );
          mOldReferrers = 0;
       }
+      #ifdef HXCPP_FUTURE_GC
+      if (mFutureDirty)
+      {
+         if (mFutureDirty->count)
+            hx::FutureGcPushDirtyChunk(mFutureDirty);
+         else
+            hx::sGlobalChunks.free(mFutureDirty);
+         mFutureDirty = 0;
+      }
+      #endif
       #endif
 
       #ifndef HXCPP_EXPLICIT_STACK_EXTENT
@@ -6025,6 +6863,7 @@ public:
 
    void PauseForCollect()
    {
+      HX_GC_TRACY_ZONE_WAIT("GC pause");
       #ifndef HXCPP_SINGLE_THREADED_APP
       volatile int dummy = 1;
       mBottomOfStack = (int *)&dummy;
@@ -6252,6 +7091,12 @@ public:
                spaceFirst = end;
 
                int size = allocSize - 4;
+               #ifdef HXCPP_FUTURE_GC
+               if (hx::gFutureGcMarkActive)
+                  hx::FutureGcAllocBlackHeader(this, buffer, size,
+                        (inObjectFlags & IMMIX_ALLOC_IS_CONTAINER)!=0);
+               else
+               #endif
                ((unsigned int *)buffer)[-1] = size | inObjectFlags;
 
                #if defined(HXCPP_GC_CHECK_POINTER) && defined(HXCPP_GC_DEBUG_ALWAYS_MOVE)
@@ -6561,6 +7406,34 @@ void InitAlloc()
 
    hx::CommonInitAlloc();
    sgAllocInit = true;
+
+   #ifdef HXCPP_FUTURE_GC
+   sgFutureLock = new std::mutex();
+   sgFutureWake = new std::condition_variable();
+   #if !defined(HX_WINRT) && !defined(__SNC__) && !defined(__ORBIS__)
+   if (const char *threads = getenv("HXCPP_FUTURE_GC_MARK_THREADS"))
+   {
+      int t = atoi(threads);
+      if (t>0 && t<=MAX_GC_THREADS)
+         sgFutureMarkThreads = t;
+   }
+   if (const char *trigger = getenv("HXCPP_FUTURE_GC_TRIGGER"))
+   {
+      double ratio = atof(trigger);
+      if (ratio>0.1 && ratio<0.95)
+         sgFutureTriggerRatio = ratio;
+   }
+   if (getenv("HXCPP_FUTURE_GC_VERBOSE"))
+      sgFutureVerbose = true;
+   if (const char *nursery = getenv("HXCPP_FUTURE_GC_NURSERY_MB"))
+   {
+      int mb = atoi(nursery);
+      if (mb>0 && mb<4096)
+         sgFutureNurseryBudget = (size_t)mb*1024*1024;
+   }
+   #endif
+   #endif
+
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
    sFinalizerLock = new std::mutex();
@@ -6668,7 +7541,17 @@ int InternalCollect(bool inMajor,bool inCompact)
    if (!sgAllocInit)
        return 0;
 
+   #ifdef HXCPP_FUTURE_GC
+   // Give explicit collects synchronous semantics: if a concurrent cycle is
+   //  (or gets) started, wait for it to complete before returning
+   if (sgFutureCycleActive)
+      FutureGcWaitForCycle(false);
    GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
+   if (sgFutureCycleActive)
+      FutureGcWaitForCycle(false);
+   #else
+   GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
+   #endif
 
    return sGlobalAlloc->MemUsage();
 }
@@ -6714,6 +7597,12 @@ void InternalReleaseMem(void *inMem)
 {
    if (inMem)
    {
+      #ifdef HXCPP_FUTURE_GC
+      // The concurrent marker may still be looking at this memory through a
+      //  stale reference - let the remark sweep release it instead
+      if (hx::gFutureGcMarkActive)
+         return;
+      #endif
       unsigned int s = ObjectSizeSafe(inMem);
       if (s>=IMMIX_LARGE_OBJ_SIZE)
       {
@@ -6959,6 +7848,14 @@ double __hxcpp_gc_mem_info(int inWhich)
 {
    switch(inWhich)
    {
+      #ifdef HXCPP_FUTURE_GC
+      // Extended queries for the concurrent collector
+      case 100: return (double)sgFutureCycleCount;
+      case 101: return sgFutureLastRemarkMs;
+      case 102: return sgFutureMaxRemarkMs;
+      case 103: return sgFutureLastCycleMs;
+      case 104: return sgFutureCycleActive ? 1.0 : 0.0;
+      #endif
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:

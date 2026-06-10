@@ -194,6 +194,10 @@ StackContext::StackContext()
    mIsUnwindingException = false;
    #endif
 
+   #ifdef HXCPP_FUTURE_GC
+   mFutureDirty = 0;
+   #endif
+
    #if HXCPP_TELEMETRY
    mTelemetry = tlmCreate(this);
    #endif

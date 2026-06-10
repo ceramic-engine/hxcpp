@@ -315,6 +315,10 @@ const hx::StaticInfo* Class_obj::GetStaticStorage(String inName)
 
 void MarkClassStatics(hx::MarkContext *__inCtx)
 {
+   // A collection can be triggered before the first class is registered
+   if (!sClassMap)
+      return;
+
    #ifdef HXCPP_DEBUG
    MarkPushClass("MarkClassStatics",__inCtx);
    #endif

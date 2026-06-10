@@ -27,6 +27,7 @@
  <flag value="-DHXCPP_GC_GENERATIONAL" if="HXCPP_GC_GENERATIONAL" tag="haxe" />
  <flag value="-DHXCPP_ALIGN_ALLOC" if="HXCPP_ALIGN_ALLOC" tag="haxe" />
  <flag value="-DHXCPP_GC_NURSERY" if="HXCPP_GC_NURSERY" tag="haxe" />
+ <flag value="-DHXCPP_FUTURE_GC" if="HXCPP_FUTURE_GC" tag="haxe" />
  <flag value="-DHXCPP_DLL_IMPORT" if="dll_import" tag="haxe" />
  <flag value="-I${dll_import_include}" if="dll_import_include" tag="haxe" />
  <flag value="-DHXCPP_DLL_EXPORT" if="dll_export||dll_link" tag="haxe" />

@@ -251,6 +251,33 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx);
 void MarkObjectArray(hx::Object **inPtr, int inLength, hx::MarkContext *__inCtx);
 void MarkStringArray(String *inPtr, int inLength, hx::MarkContext *__inCtx);
 
+#ifdef HXCPP_FUTURE_GC
+// A concurrent scan can race an array resize and observe a mismatched
+//  (base,length) pair.  Bound the scan by the size of the allocation actually
+//  being scanned - any elements this might skip were stored with write
+//  barriers, so they are covered by shading or a remark re-scan.
+// Must only be applied to the allocation base pointer, never to an interior
+//  pointer (eg. parallel-mark sub-ranges).
+inline int FutureGcClampArrayScan(const void *inBase, int inLength, int inElemSize)
+{
+   extern HXCPP_EXTERN_CLASS_ATTRIBUTES int gFutureGcMarkActive;
+   if (gFutureGcMarkActive && inLength>0)
+   {
+      unsigned int header = ((unsigned int *)inBase)[-1];
+      if (!(header & HX_GC_CONST_ALLOC_BIT))
+      {
+         int maxElems = (int)(ObjectSizeSafe((void *)inBase)/inElemSize);
+         if (inLength>maxElems)
+            return maxElems<0 ? 0 : maxElems;
+      }
+   }
+   return inLength;
+}
+#define HX_FUTURE_GC_CLAMP_ARRAY(base,len,elemSize)    len = ::hx::FutureGcClampArrayScan(base,len,elemSize);    if (len<=0) return;
+#else
+#define HX_FUTURE_GC_CLAMP_ARRAY(base,len,elemSize)
+#endif
+
 // Provide extra debug info to the marking routines
 #ifdef HXCPP_DEBUG
 HXCPP_EXTERN_CLASS_ATTRIBUTES void MarkSetMember(const char *inName ,hx::MarkContext *__inCtx);
@@ -340,6 +367,50 @@ extern int gMarkID;
 extern int gMarkIDWithContainer;
 extern void BadImmixAlloc();
 
+class ImmixAllocator;
+
+#ifdef HXCPP_FUTURE_GC
+
+// HXCPP_FUTURE_GC - mostly-concurrent major collections on top of the
+//  generational collector.  While a concurrent mark cycle is running
+//  (gFutureGcMarkActive), the compiler-inserted write barriers switch from
+//  recording old->young referrers to a Dijkstra-style "shade the value"
+//  barrier, and allocation switches to allocate-black.
+
+#ifndef HXCPP_GC_GENERATIONAL
+#error "HXCPP_FUTURE_GC requires HXCPP_GC_GENERATIONAL (add -D HXCPP_GC_GENERATIONAL)"
+#endif
+#ifdef HXCPP_SINGLE_THREADED_APP
+#error "HXCPP_FUTURE_GC is not supported with HXCPP_SINGLE_THREADED_APP"
+#endif
+#ifdef HXCPP_GC_VERIFY
+#error "HXCPP_GC_VERIFY is not supported with HXCPP_FUTURE_GC"
+#endif
+#ifdef HXCPP_GC_DEBUG_ALWAYS_MOVE
+#error "HXCPP_GC_DEBUG_ALWAYS_MOVE is not supported with HXCPP_FUTURE_GC"
+#endif
+
+// Marks-allocs use the full 6 bits
+#define HX_FUTURE_GC_MARK_BIT_MASK 0x3f
+
+// Non-zero while a concurrent major mark is in progress (set/cleared inside
+//  stop-the-world pauses, so mutators always observe consistent values).
+HXCPP_EXTERN_CLASS_ATTRIBUTES extern int gFutureGcMarkActive;
+
+// Mark inValue (must be a non-const gc pointer) and queue it for scanning.
+// Called by the mutator, so the scan happens with correct memory visibility.
+HXCPP_EXTERN_CLASS_ATTRIBUTES void FutureGcShade(void *inValue, hx::StackContext *inCtx);
+
+// Record that inObj must be re-scanned during the final remark pause because
+//  pointers may have been copied into it without individual barriers.
+HXCPP_EXTERN_CLASS_ATTRIBUTES void FutureGcDirtyObject(hx::Object *inObj, hx::StackContext *inCtx);
+
+// Write an "allocate black" header (full mark id, alloc-start + shadow row
+//  marks) for an object freshly bump-allocated at inBuffer.
+HXCPP_EXTERN_CLASS_ATTRIBUTES void FutureGcAllocBlackHeader(hx::ImmixAllocator *inAlloc, unsigned char *inBuffer, int inSize, bool inContainer);
+
+#endif // HXCPP_FUTURE_GC
+
 
 class ImmixAllocator
 {
@@ -382,6 +453,11 @@ public:
          {
             alloc->spaceFirst = end;
 
+            #ifdef HXCPP_FUTURE_GC
+            if (::hx::gFutureGcMarkActive)
+               ::hx::FutureGcAllocBlackHeader(alloc, buffer, (int)inSize, inContainer);
+            else
+            #endif
             if (inContainer)
                ((unsigned int *)buffer)[-1] = inSize | IMMIX_ALLOC_IS_CONTAINER;
             else
@@ -454,7 +530,64 @@ typedef ImmixAllocator GcAllocator;
 typedef ImmixAllocator Ctx;
 
 
-#ifdef HXCPP_GC_GENERATIONAL
+#ifdef HXCPP_FUTURE_GC
+
+#define HX_FUTURE_GC_SHADE_CTX(value,ctx) { \
+   if (value) { \
+      unsigned char _hx_fshade_mark = ((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE ]; \
+      if ( !(_hx_fshade_mark & HX_GC_CONST_ALLOC_MARK_BIT) && \
+            (_hx_fshade_mark & HX_FUTURE_GC_MARK_BIT_MASK) != (::hx::gByteMarkID & HX_FUTURE_GC_MARK_BIT_MASK) ) \
+         ::hx::FutureGcShade((void *)(value),(::hx::StackContext *)(ctx)); \
+   } }
+
+#define HX_FUTURE_GC_DIRTY_CTX(obj,ctx) { \
+   unsigned char _hx_fdirty_mark = ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE ]; \
+   if ( !(_hx_fdirty_mark & (HX_GC_REMEMBERED|HX_GC_CONST_ALLOC_MARK_BIT)) ) \
+      ::hx::FutureGcDirtyObject((hx::Object *)(obj),(::hx::StackContext *)(ctx)); \
+   }
+
+// Fired after bulk pointer copies into obj (array/bucket reallocation) which
+//  do not have per-element barriers - forces a consistent re-scan at remark.
+#define HX_OBJ_WB_FUTURE_BULK(obj) { \
+   if (::hx::gFutureGcMarkActive) HX_FUTURE_GC_DIRTY_CTX(obj,HX_CTX_GET); }
+
+#else  // !HXCPP_FUTURE_GC
+
+#define HX_OBJ_WB_FUTURE_BULK(obj)
+
+#endif // HXCPP_FUTURE_GC
+
+
+#if defined(HXCPP_GC_GENERATIONAL) && defined(HXCPP_FUTURE_GC)
+  // Concurrent-aware barriers.  When no concurrent cycle is running these are
+  //  identical to the plain generational barriers.  During a cycle, stores
+  //  shade the new value (Dijkstra incremental-update barrier) so no
+  //  black->white pointer can be created without the target being queued.
+  #define HX_OBJ_WB_CTX(obj,value,ctx) { \
+     if (::hx::gFutureGcMarkActive) { \
+        HX_FUTURE_GC_SHADE_CTX(value,ctx) \
+     } else { \
+        unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
+        if (mark == ::hx::gByteMarkID && value && !((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE  ] ) { \
+            mark|=HX_GC_REMEMBERED; \
+            ctx->pushReferrer(obj); \
+     } } }
+  #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx) { \
+     if (::hx::gFutureGcMarkActive) { \
+        HX_FUTURE_GC_DIRTY_CTX(obj,ctx) \
+     } else { \
+        unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
+        if (mark == ::hx::gByteMarkID)  { \
+           mark|=HX_GC_REMEMBERED; \
+           ctx->pushReferrer(obj); \
+     } } }
+  #define HX_OBJ_WB_NEW_MARKED_OBJECT(obj) { \
+     if (::hx::gFutureGcMarkActive) { \
+        HX_FUTURE_GC_DIRTY_CTX(obj,HX_CTX_GET) \
+     } else \
+     if (((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]==::hx::gByteMarkID) ::hx::NewMarkedObject(obj); \
+  }
+#elif defined(HXCPP_GC_GENERATIONAL)
   #define HX_OBJ_WB_CTX(obj,value,ctx) { \
         unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
         if (mark == ::hx::gByteMarkID && value && !((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE  ] ) { \

@@ -63,18 +63,22 @@ template<typename T> inline void MarkMemberArray(T *,int, hx::MarkContext *__inC
 }
 template<> inline void MarkMemberArray<String>(String *ioStrings,int inLen,hx::MarkContext *__inCtx)
 {
+   HX_FUTURE_GC_CLAMP_ARRAY(ioStrings,inLen,(int)sizeof(String))
    hx::MarkStringArray(ioStrings,inLen,__inCtx);
 }
 template<typename T> inline void MarkMemberArray(hx::ObjectPtr<T> *inObjects, int inLen, hx::MarkContext *__inCtx)
 {
+   HX_FUTURE_GC_CLAMP_ARRAY(inObjects,inLen,(int)sizeof(void *))
    hx::MarkObjectArray( (hx::Object **)inObjects ,inLen,__inCtx);
 }
 template<> inline void MarkMemberArray(Dynamic *outT,int inLen, hx::MarkContext *__inCtx)
 {
+   HX_FUTURE_GC_CLAMP_ARRAY(outT,inLen,(int)sizeof(void *))
    hx::MarkObjectArray( (hx::Object **)outT ,inLen,__inCtx);
 }
 template<> inline void MarkMemberArray(hx::Object **outT,int inLen, hx::MarkContext *__inCtx)
 {
+   HX_FUTURE_GC_CLAMP_ARRAY(outT,inLen,(int)sizeof(void *))
    hx::MarkObjectArray( outT ,inLen,__inCtx);
 }
 template<typename T> inline void MarkMemberArray(Array<T> *outT,int inLen,hx::MarkContext *__inCtx)
