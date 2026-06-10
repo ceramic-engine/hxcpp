@@ -16,13 +16,16 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
 
 ## How a cycle works
 
-1. **Trigger** — at the end of a normal minor (generational) collect, if the
-   projected heap occupancy exceeds the trigger ratio (default 0.7,
-   `HXCPP_FUTURE_GC_TRIGGER`), a concurrent cycle starts *inside the same
-   pause*: mark ids are flipped (everything becomes white), the shadow
-   row-mark slab is zeroed, the concurrent barriers are armed and all roots
-   (statics, GC roots, zombies, conservative thread stacks) are pushed onto
-   the mark queue without being scanned.
+1. **Quick-start trigger** — when a collect is requested and the projected
+   heap occupancy exceeds the trigger ratio (default 0.7,
+   `HXCPP_FUTURE_GC_TRIGGER`), the cycle starts in a *minimal* pause
+   (~0.2-0.4 ms) instead of running a stop-the-world minor: mark ids are
+   flipped (everything becomes white), the concurrent barriers are armed,
+   the remembered set is handed to the markers and all roots (statics, GC
+   roots, zombies, conservative thread stacks) are pushed onto the mark
+   queue without being scanned.  Live nursery objects are promoted
+   *concurrently* as part of the normal graph walk.  Below the trigger,
+   ordinary minor collects run unchanged.
 
 2. **Concurrent mark** — a coordinator thread drains the queue using the
    existing parallel-mark worker pool (default 2 workers,
@@ -54,6 +57,13 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
    the free lists rebuilt. Every ~15th cycle this pause performs a full
    reclaim to scrub stale alloc-start data before the 4-bit mark id wraps.
 
+   The remark drain is *time-boxed* (default 4 ms,
+   `HXCPP_FUTURE_GC_REMARK_BUDGET_MS`): if too much newly-live data surfaces
+   (e.g. a large structure whose only reference migrated to a stack during
+   the cycle), the world is resumed, marking continues concurrently and the
+   remark is retried - the third attempt is unbounded.  This caps the
+   worst-case pause instead of just the typical one.
+
 Minor collects are unchanged (already short); between collects the heap may
 grow by a nursery budget (default 32 MB, `HXCPP_FUTURE_GC_NURSERY_MB`) before
 a minor is forced — survivors, not nursery size, drive the minor pause, so
@@ -84,6 +94,7 @@ this mostly trades memory for throughput.
 | `HXCPP_FUTURE_GC_MARK_THREADS` | 2 | worker threads used for concurrent marking |
 | `HXCPP_FUTURE_GC_TRIGGER` | 0.7 | projected-occupancy ratio that starts a cycle |
 | `HXCPP_FUTURE_GC_NURSERY_MB` | 32 | heap growth allowed between minor collects |
+| `HXCPP_FUTURE_GC_REMARK_BUDGET_MS` | 4 | remark drain budget before resuming + retrying |
 | `HXCPP_FUTURE_GC_VERBOSE` | off | log cycle/pause timings to stdout |
 
 ## Tracy
@@ -103,18 +114,17 @@ allocation + mutation, 3000 frames):
 
 | | classic generational | FUTURE_GC |
 |---|---|---|
-| avg frame | 0.22 ms | 0.27 ms |
-| p99.9 frame | 3.9 ms | 3.3 ms |
-| **max frame** | **11.4 ms** | **3.6 ms** |
-| max remark pause | — | 1.5 ms (typ. 0.5–0.8) |
+| avg frame | 0.22 ms | 0.24 ms |
+| p99.9 frame | 4.1 ms | 1.2–1.4 ms |
+| **max frame** | **11.2 ms** | **1.3–2.9 ms** |
+| cycle-start pause | — | avg 0.27 ms, max 0.32 ms |
+| remark pause | — | avg 0.77 ms, max 0.97 ms |
 
-Binary-trees (depth 19): 635 ms → 728 ms (+15%).
-Short-lived allocation rate: 284 M/s → 283 M/s (unchanged).
+All stop-the-world GC pauses during gameplay are sub-millisecond; the frame
+tail above remark time is ordinary frame work colliding with a pause.
 
-The remaining multi-ms tail under FUTURE_GC is the *minor* collect that
-fronts each cycle (proportional to live nursery), not the concurrent
-machinery; at real frame rates with per-frame nurseries it shrinks
-accordingly.
+Binary-trees (depth 19): 635 ms → 751 ms (+18%).
+Short-lived allocation rate: 284 M/s → 288 M/s (unchanged).
 
 ## Files
 
