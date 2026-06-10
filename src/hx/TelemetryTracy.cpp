@@ -191,7 +191,11 @@ void hx::tlmSampleEnter(hx::Telemetry* telemetry, hx::StackFrame* frame)
 {
 	auto srcloc =
 		___tracy_alloc_srcloc(
+			#ifdef HXCPP_STACK_LINE
 			frame->lineNumber,
+			#else
+			0,
+			#endif
 			frame->position->fileName,
 			strlen(frame->position->fileName),
 			frame->position->fullName,
