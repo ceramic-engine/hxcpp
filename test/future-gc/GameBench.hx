@@ -112,6 +112,9 @@ class GameBench {
          }
 
          frameTimes[frame] = (haxe.Timer.stamp() - f0) * 1000.0;
+         #if HXCPP_TRACY
+         cpp.vm.tracy.TracyProfiler.frameMark();
+         #end
       }
       var total = haxe.Timer.stamp() - tStart;
 
