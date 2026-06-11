@@ -50,19 +50,29 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
    * The heap may grow during a cycle rather than ever making a mutator wait
      for the marker (the cycle is asked to *accelerate* instead).
 
-3. **Remark (stop-the-world, sub-millisecond typical)** — roots and stacks
-   are re-scanned, per-thread chunks are flushed, dirty objects re-scanned,
-   the residual queue drained with all workers, finalizers/weak refs/zombies
-   processed, shadow row marks swapped into place (dead rows drop out) and
-   the free lists rebuilt. Every ~15th cycle this pause performs a full
-   reclaim to scrub stale alloc-start data before the 4-bit mark id wraps.
+3. **Remark (stop-the-world, ~0.2-0.4 ms)** — roots and stacks are
+   re-scanned, per-thread chunks flushed, dirty objects re-scanned, the
+   residual queue drained, finalizers/weak refs/zombies processed and dead
+   large objects released (safe here: marking is complete, so an unmarked
+   header provably means dead).
 
-   The remark drain is *time-boxed* (default 4 ms,
+   The drain is *time-boxed* (default 4 ms,
    `HXCPP_FUTURE_GC_REMARK_BUDGET_MS`): if too much newly-live data surfaces
    (e.g. a large structure whose only reference migrated to a stack during
    the cycle), the world is resumed, marking continues concurrently and the
    remark is retried - the third attempt is unbounded.  This caps the
    worst-case pause instead of just the typical one.
+
+4. **Concurrent sweep preparation** — with the world running again, the
+   shadow row marks are swapped into place and every block is recounted,
+   using the per-block zero-lock to exclude allocators and ownership epochs
+   to leave actively-bumped blocks alone.  Every ~15th cycle this pass
+   performs a full per-block reclaim, scrubbing stale alloc-start data
+   before the 4-bit mark id wraps (conservative-scan safety).
+
+5. **Publish (stop-the-world, ~0.1-0.3 ms)** — fresh free lists are built
+   from the swept blocks (skipping any with a live bump allocator) and the
+   memory accounting/growth budgets are updated.
 
 Minor collects are unchanged (already short); between collects the heap may
 grow by a nursery budget (default 32 MB, `HXCPP_FUTURE_GC_NURSERY_MB`) before
@@ -85,7 +95,8 @@ this mostly trades memory for throughput.
   pause with marking complete — same semantics as a classic full collect.
 * `Gc.memInfo64()` extensions: `100` = completed cycles, `101` = last remark
   pause (ms), `102` = max remark pause (ms), `103` = last full cycle length
-  (ms), `104` = cycle currently active.
+  (ms), `104` = cycle currently active, `105` = last publish pause (ms),
+  `106` = max publish pause (ms).
 
 ## Environment knobs
 
@@ -114,17 +125,19 @@ allocation + mutation, 3000 frames):
 
 | | classic generational | FUTURE_GC |
 |---|---|---|
-| avg frame | 0.22 ms | 0.24 ms |
-| p99.9 frame | 4.1 ms | 1.2–1.4 ms |
-| **max frame** | **11.2 ms** | **1.3–2.9 ms** |
-| cycle-start pause | — | avg 0.27 ms, max 0.32 ms |
-| remark pause | — | avg 0.77 ms, max 0.97 ms |
+| avg frame | 0.24 ms | 0.22 ms |
+| p99.9 frame | 4.3 ms | 1.0–1.4 ms |
+| **max frame** | **11.4 ms** | **1.1–2.4 ms** |
+| cycle-start pause | — | avg 0.31 ms, max 0.86 ms |
+| remark pause | — | avg 0.22 ms, max 0.42 ms |
+| publish pause | — | avg 0.14 ms, max 0.29 ms |
 
-All stop-the-world GC pauses during gameplay are sub-millisecond; the frame
-tail above remark time is ordinary frame work colliding with a pause.
+Every stop-the-world GC pause during gameplay is well under one
+millisecond, fitting a 1 ms frame budget; the frame tail above pause time
+is ordinary frame work colliding with a pause.
 
-Binary-trees (depth 19): 635 ms → 751 ms (+18%).
-Short-lived allocation rate: 284 M/s → 288 M/s (unchanged).
+Binary-trees (depth 19): 635 ms → 717 ms (+13%).
+Short-lived allocation rate: ~285 M allocs/s in both.
 
 ## Files
 
