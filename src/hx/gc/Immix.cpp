@@ -81,7 +81,9 @@ enum { gAlwaysMove = false };
 #define HX_GC_TRACY_ZONE_STW(name)        ZoneScopedNC(name, 0xbb3322)
 #define HX_GC_TRACY_ZONE_CONCURRENT(name) ZoneScopedNC(name, 0xcc8833)
 #define HX_GC_TRACY_ZONE_WAIT(name)       ZoneScopedNC(name, 0xaaaa33)
-#define HX_GC_TRACY_TEXT(txt)             ZoneText(txt, strlen(txt))
+// Note: no ZoneText here - with HXCPP_TELEMETRY, nested telemetry zones sit
+//  between a GC zone and any later text emission, and tracy rejects text
+//  that does not target the innermost active zone.
 #define HX_GC_TRACY_PLOT(name,val)        TracyPlot(name, val)
 #define HX_GC_TRACY_THREAD(name)          tracy::SetThreadName(name)
 #define HX_GC_TRACY_MESSAGE(msg)          TracyMessageL(msg)
@@ -89,7 +91,6 @@ enum { gAlwaysMove = false };
 #define HX_GC_TRACY_ZONE_STW(name)
 #define HX_GC_TRACY_ZONE_CONCURRENT(name)
 #define HX_GC_TRACY_ZONE_WAIT(name)
-#define HX_GC_TRACY_TEXT(txt)
 #define HX_GC_TRACY_PLOT(name,val)
 #define HX_GC_TRACY_THREAD(name)
 #define HX_GC_TRACY_MESSAGE(msg)
@@ -5342,7 +5343,7 @@ public:
          double projected = filled + (1.0-filled)*mGenerationalRetainEstimate;
          if (inMajor || projected >= sgFutureTriggerRatio-0.1)
          {
-            HX_GC_TRACY_TEXT("cycle quick-start");
+            HX_GC_TRACY_MESSAGE("GC quick-start (concurrent cycle begin)");
 
             // Hand the remembered set to the concurrent markers, clearing
             //  the remembered bits so the pessimistic barrier stays armed
@@ -5901,7 +5902,7 @@ public:
       __hxt_gc_end();
       #endif
 
-      HX_GC_TRACY_TEXT(generational ? "minor" : "full");
+      HX_GC_TRACY_MESSAGE(generational ? "GC minor collect" : "GC full collect");
       HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
       HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
 

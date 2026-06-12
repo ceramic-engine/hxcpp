@@ -110,7 +110,18 @@ this mostly trades memory for throughput.
 
 ## Tracy
 
-With `-D HXCPP_TRACY` the collector emits zones on every thread:
+Two build flavours:
+
+* `-D HXCPP_TRACY -D HXCPP_TRACY_ON_DEMAND` — GC zones/plots only, minimal
+  overhead, numbers closest to a non-profiled build.
+* add `-D HXCPP_TELEMETRY` — additionally emits per-function Haxe zones and
+  enables `cpp.vm.tracy.TracyProfiler` (frame marks etc.) at some mutator
+  overhead.
+
+The vendored client is tracy 0.12.0 - the profiler/capture tools must match
+(0.12.x; 0.13 is protocol-incompatible).
+
+The collector emits zones on every thread:
 
 * red — stop-the-world work (`GC collect`, `GC remark`)
 * orange — concurrent work (`GC concurrent cycle`, `GC mark`)
