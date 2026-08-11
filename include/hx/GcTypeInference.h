@@ -100,6 +100,14 @@ template<typename T> inline const void *PointerOf( ::hx::Native<T> &o)
    return 0;
 }
 
+// Generic fallback: no GC pointer inside the member.  A template (rather
+// than only the varargs overload below) so that non-trivial class types
+// like cpp::Pointer<T> compile too - passing them through `...` is an
+// error ("cannot pass object of non-trivial type through variadic
+// function"), hit e.g. by Array<cpp.Pointer<T>> member write barriers
+// when HXCPP_GC_GENERATIONAL is enabled.
+template<typename T> inline const void *PointerOf(T &) { return 0; }
+
 inline const void *PointerOf(...) { return 0; }
 
 
