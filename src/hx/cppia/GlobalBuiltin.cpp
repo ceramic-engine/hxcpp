@@ -1,6 +1,10 @@
 #include <hxcpp.h>
 #include "Cppia.h"
 
+#if (HXCPP_API_LEVEL>=500)
+#include <hx/thread/Thread.hpp>
+#endif
+
 namespace hx
 {
 
@@ -381,14 +385,12 @@ CppiaExpr *createGlobalBuiltin(CppiaExpr *src, String function, Expressions &ioE
    if (function==HX_CSTRING("__hxcpp_thread_create") )
    {
       if (ioExpressions.size()==1)
-         return new ObjectBuiltin1<Dynamic,Dynamic,__hxcpp_thread_create>(src,ioExpressions);
+#if (HXCPP_API_LEVEL>=500)
+          return new ObjectBuiltin1<hx::Callable<void(void)>, hx::thread::Thread, hx::thread::Thread_obj::create>(src, ioExpressions);
+#else
+          return new ObjectBuiltin1<Dynamic, Dynamic, __hxcpp_thread_create>(src, ioExpressions);
+#endif
    }
-   if (function==HX_CSTRING("__hxcpp_thread_send") )
-   {
-      if (ioExpressions.size()==2)
-         return new VoidBuiltin2<Dynamic,Dynamic,__hxcpp_thread_send>(src,ioExpressions);
-   }
-
 
    printf("Unknown function : %s(%d)\n", function.out_str(), (int)ioExpressions.size() );
    throw (HX_CSTRING("Unknown global:") + function).utf8_str();

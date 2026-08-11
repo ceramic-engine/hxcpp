@@ -7,7 +7,9 @@
 #include <hx/Thread.h>
 #include <hx/Telemetry.h>
 #include <hx/Unordered.h>
+#include <hx/thread/Thread.hpp>
 #include <hx/OS.h>
+#include <mutex>
 
 
 #if defined(HXCPP_CATCH_SEGV) && !defined(_MSC_VER)
@@ -45,7 +47,7 @@ namespace hx
 const char* EXTERN_CLASS_NAME = "extern";
 
 #ifdef HXCPP_STACK_IDS
-HX_IMMORTAL(HxMutex, sStackMapMutex);
+HX_IMMORTAL(std::mutex, sStackMapMutex);
 typedef UnorderedMap<int, StackContext *> StackMap;
 HX_IMMORTAL(StackMap, sStackMap);
 #endif
@@ -192,6 +194,10 @@ StackContext::StackContext()
    mIsUnwindingException = false;
    #endif
 
+   #ifdef HXCPP_FUTURE_GC
+   mFutureDirty = 0;
+   #endif
+
    #if HXCPP_TELEMETRY
    mTelemetry = tlmCreate(this);
    #endif
@@ -243,11 +249,12 @@ StackContext::~StackContext()
 void StackContext::onThreadAttach()
 {
    #ifdef HXCPP_STACK_IDS
-   mThreadId = __hxcpp_GetCurrentThreadNumber();
+    mThreadId = hx::thread::Thread_obj::id();
 
-   sStackMapMutex.Lock();
-   sStackMap[mThreadId] = this;
-   sStackMapMutex.Unlock();
+   {
+       std::lock_guard<std::mutex> guard(sStackMapMutex);
+       sStackMap[mThreadId] = this;
+   }
    #endif
 
    #ifdef HXCPP_DEBUGGER
@@ -302,9 +309,10 @@ void StackContext::onThreadDetach()
    #endif
 
    #ifdef HXCPP_STACK_IDS
-   sStackMapMutex.Lock();
-   sStackMap.erase(mThreadId);
-   sStackMapMutex.Unlock();
+   {
+       std::lock_guard<std::mutex> guard(sStackMapMutex);
+       sStackMap.erase(mThreadId);
+   }
    mThreadId = 0;
    #endif
 
@@ -317,18 +325,17 @@ void StackContext::onThreadDetach()
 void StackContext::getAllStackIds( QuickVec<int> &outIds )
 {
    outIds.clear();
-   sStackMapMutex.Lock();
+
+   std::lock_guard<std::mutex> guard(sStackMapMutex);
+
    for(StackMap::iterator i=sStackMap.begin(); i!=sStackMap.end(); ++i)
       outIds.push(i->first);
-   sStackMapMutex.Unlock();
 }
 
 StackContext *StackContext::getStackForId(int id)
 {
-   sStackMapMutex.Lock();
-   StackContext *result = sStackMap[id];
-   sStackMapMutex.Unlock();
-   return result;
+   std::lock_guard<std::mutex> guard(sStackMapMutex);
+   return sStackMap[id];
 }
 #endif
 

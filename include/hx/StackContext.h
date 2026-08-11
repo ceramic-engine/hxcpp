@@ -116,7 +116,7 @@
        ::hx::StackVariable __stackvariable_##cpp_var(_hx_stackframe.variables, false, haxe_name, &cpp_var);
 
    #define HX_STACK_CATCHABLE(T, n)                                        \
-       hx::StackCatchable __stackcatchable_##n                             \
+       ::hx::StackCatchable __stackcatchable_##n                             \
            (_hx_stackframe, reinterpret_cast<T *>(&_hx_stackframe));
 
    // If HXCPP_DEBUGGER is enabled, then a throw is checked to see if it
@@ -433,6 +433,11 @@ struct StackContext : public hx::ImmixAllocator
 
    #ifdef HXCPP_GC_GENERATIONAL
    MarkChunk *mOldReferrers;
+   #ifdef HXCPP_FUTURE_GC
+   // Objects needing a consistent re-scan in the final remark pause of a
+   //  concurrent mark cycle (pessimistic/bulk write barriers).
+   MarkChunk *mFutureDirty;
+   #endif
    inline void pushReferrer(hx::Object *inObj)
    {
       // If collector is running on non-generational mode, mOldReferrers will be null
