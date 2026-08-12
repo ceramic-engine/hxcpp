@@ -7824,6 +7824,12 @@ void InitAlloc()
    #ifdef HXCPP_FUTURE_GC
    sgFutureLock = new std::mutex();
    sgFutureWake = new std::condition_variable();
+   // Compile-time opt-in for verbose cycle logging: environment variables
+   // are impractical on some platforms (e.g. android apps), so allow
+   // `-D HXCPP_FUTURE_GC_VERBOSE` to enable it at build time too
+   #ifdef HXCPP_FUTURE_GC_VERBOSE
+   sgFutureVerbose = true;
+   #endif
    #if !defined(HX_WINRT) && !defined(__SNC__) && !defined(__ORBIS__)
    if (const char *threads = getenv("HXCPP_FUTURE_GC_MARK_THREADS"))
    {
