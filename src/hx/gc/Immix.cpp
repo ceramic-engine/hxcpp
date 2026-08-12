@@ -6069,10 +6069,23 @@ public:
 
       double tLock0 = __hxcpp_time_stamp();
       gThreadStateChangeLock->lock();
+      // Verbose diagnostics: a slow stop phase is almost always a mutator
+      //  thread blocked in a long native call without a GC free zone
+      //  (e.g. a driver call waiting on vsync) - name the offender so it
+      //  can be tracked down instead of showing up as a big opaque pause.
+      double tAfterLock = __hxcpp_time_stamp();
+      if (sgFutureVerbose && (tAfterLock-tLock0)*1000.0 > 0.5)
+         GCLOG("Future GC: remark lock wait %.3fms\n", (tAfterLock-tLock0)*1000.0);
       _hx_atomic_compare_exchange((volatile int *)&hx::gPauseForCollect, 0, 0xffffffff);
 
       for(int i=0;i<mLocalAllocs.size();i++)
+      {
+         double tw0 = __hxcpp_time_stamp();
          WaitForSafe(mLocalAllocs[i]);
+         double twd = (__hxcpp_time_stamp()-tw0)*1000.0;
+         if (sgFutureVerbose && twd > 0.5)
+            GCLOG("Future GC: remark WaitForSafe(alloc %d of %d) %.3fms\n", i, mLocalAllocs.size(), twd);
+      }
 
       sgIsCollecting = true;
 
