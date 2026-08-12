@@ -194,8 +194,8 @@ StackContext::StackContext()
    mIsUnwindingException = false;
    #endif
 
-   #ifdef HXCPP_FUTURE_GC
-   mFutureDirty = 0;
+   #ifdef HXCPP_GC_CONCURRENT
+   mConcurrentDirty = 0;
    #endif
 
    #if HXCPP_TELEMETRY

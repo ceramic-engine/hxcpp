@@ -433,10 +433,10 @@ struct StackContext : public hx::ImmixAllocator
 
    #ifdef HXCPP_GC_GENERATIONAL
    MarkChunk *mOldReferrers;
-   #ifdef HXCPP_FUTURE_GC
+   #ifdef HXCPP_GC_CONCURRENT
    // Objects needing a consistent re-scan in the final remark pause of a
    //  concurrent mark cycle (pessimistic/bulk write barriers).
-   MarkChunk *mFutureDirty;
+   MarkChunk *mConcurrentDirty;
    #endif
    inline void pushReferrer(hx::Object *inObj)
    {

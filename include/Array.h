@@ -931,7 +931,7 @@ public:
          e[i] = tmp;
       }
       if (hx::ContainsPointers<ELEM_>())
-         { HX_OBJ_WB_FUTURE_BULK(this); }
+         { HX_OBJ_WB_CONCURRENT_BULK(this); }
    }
 
    // Will do random pointer sorting for object pointers

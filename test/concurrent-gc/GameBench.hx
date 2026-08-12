@@ -138,7 +138,7 @@ class GameBench {
       Sys.println('mem=${Std.int(Gc.memInfo64(Gc.MEM_INFO_USAGE)/1024/1024)}MB reserved=${Std.int(Gc.memInfo64(Gc.MEM_INFO_RESERVED)/1024/1024)}MB');
       var cycles = Gc.memInfo64(100);
       if (cycles > 0)
-         Sys.println('future cycles=$cycles lastRemark=${round2(Gc.memInfo64(101))}ms maxRemark=${round2(Gc.memInfo64(102))}ms');
+         Sys.println('concurrent cycles=$cycles lastRemark=${round2(Gc.memInfo64(101))}ms maxRemark=${round2(Gc.memInfo64(102))}ms');
       Sys.println("BENCH OK");
    }
 

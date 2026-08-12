@@ -1,13 +1,13 @@
-# HXCPP_FUTURE_GC — mostly-concurrent major collections
+# HXCPP_GC_CONCURRENT — mostly-concurrent major collections
 
-`-D HXCPP_FUTURE_GC` is an add-on to the generational collector
+`-D HXCPP_GC_CONCURRENT` is an add-on to the generational collector
 (`-D HXCPP_GC_GENERATIONAL` is required) that replaces stop-the-world *major*
 collections with a mostly-concurrent mark cycle. It targets latency-sensitive
 applications — games in particular — where a 5–20 ms full-collect stall is
 visible as a dropped frame.
 
 ```
-haxe ... -D HXCPP_GC_GENERATIONAL -D HXCPP_FUTURE_GC
+haxe ... -D HXCPP_GC_GENERATIONAL -D HXCPP_GC_CONCURRENT
 ```
 
 No Haxe compiler changes are required: the design reuses the write-barrier
@@ -18,7 +18,7 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
 
 1. **Quick-start trigger** — when a collect is requested and the projected
    heap occupancy exceeds the trigger ratio (default 0.7,
-   `HXCPP_FUTURE_GC_TRIGGER`), the cycle starts in a *minimal* pause
+   `HXCPP_GC_CONCURRENT_TRIGGER`), the cycle starts in a *minimal* pause
    (~0.2-0.4 ms) instead of running a stop-the-world minor: mark ids are
    flipped (everything becomes white), the concurrent barriers are armed,
    the remembered set is handed to the markers and all roots (statics, GC
@@ -29,7 +29,7 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
 
 2. **Concurrent mark** — a coordinator thread drains the queue using the
    existing parallel-mark worker pool (default 2 workers,
-   `HXCPP_FUTURE_GC_MARK_THREADS`) while the mutators keep running:
+   `HXCPP_GC_CONCURRENT_MARK_THREADS`) while the mutators keep running:
 
    * **Write barrier (Dijkstra, incremental update)** — storing a pointer to
      an unmarked object *shades* it: the mutator marks it and queues it
@@ -57,7 +57,7 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
    header provably means dead).
 
    The drain is *time-boxed* (default 4 ms,
-   `HXCPP_FUTURE_GC_REMARK_BUDGET_MS`): if too much newly-live data surfaces
+   `HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS`): if too much newly-live data surfaces
    (e.g. a large structure whose only reference migrated to a stack during
    the cycle), the world is resumed, marking continues concurrently and the
    remark is retried - the third attempt is unbounded.  This caps the
@@ -75,7 +75,7 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
    memory accounting/growth budgets are updated.
 
 Minor collects are unchanged (already short); between collects the heap may
-grow by a nursery budget (default 32 MB, `HXCPP_FUTURE_GC_NURSERY_MB`) before
+grow by a nursery budget (default 32 MB, `HXCPP_GC_CONCURRENT_NURSERY_MB`) before
 a minor is forced — survivors, not nursery size, drive the minor pause, so
 this mostly trades memory for throughput.
 
@@ -102,11 +102,11 @@ this mostly trades memory for throughput.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HXCPP_FUTURE_GC_MARK_THREADS` | 2 | worker threads used for concurrent marking |
-| `HXCPP_FUTURE_GC_TRIGGER` | 0.7 | projected-occupancy ratio that starts a cycle |
-| `HXCPP_FUTURE_GC_NURSERY_MB` | 32 | heap growth allowed between minor collects |
-| `HXCPP_FUTURE_GC_REMARK_BUDGET_MS` | 4 | remark drain budget before resuming + retrying |
-| `HXCPP_FUTURE_GC_VERBOSE` | off | log cycle/pause timings to stdout |
+| `HXCPP_GC_CONCURRENT_MARK_THREADS` | 2 | worker threads used for concurrent marking |
+| `HXCPP_GC_CONCURRENT_TRIGGER` | 0.7 | projected-occupancy ratio that starts a cycle |
+| `HXCPP_GC_CONCURRENT_NURSERY_MB` | 32 | heap growth allowed between minor collects |
+| `HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS` | 4 | remark drain budget before resuming + retrying |
+| `HXCPP_GC_CONCURRENT_VERBOSE` | off | log cycle/pause timings to stdout |
 
 ## Tracy
 
@@ -129,12 +129,12 @@ The collector emits zones on every thread:
 * plots — `GC/used (MB)`, `GC/reserved (MB)`
 * GC threads are named (`hxcpp gc coordinator`, `hxcpp gc worker N`)
 
-## Measured results (M-series macOS, arm64, `test/future-gc`)
+## Measured results (M-series macOS, arm64, `test/concurrent-gc`)
 
 Game-style benchmark (150k-entity world, ~100 MB live, heavy per-frame
 allocation + mutation, 3000 frames):
 
-| | classic generational | FUTURE_GC |
+| | classic generational | GC_CONCURRENT |
 |---|---|---|
 | avg frame | 0.24 ms | 0.22 ms |
 | p99.9 frame | 4.3 ms | 1.0–1.4 ms |
@@ -157,4 +157,4 @@ Short-lived allocation rate: ~285 M allocs/s in both.
 * `include/hx/GC.h` — barrier macros, inline allocate-black hook, scan clamp.
 * `include/hx/GcTypeInference.h`, `src/hx/Hash.h`, `src/Array.cpp`,
   `include/Array.h` — concurrent-safe container scanning + bulk barriers.
-* `test/future-gc/` — correctness stress tests and benchmarks (`./run.sh`).
+* `test/concurrent-gc/` — correctness stress tests and benchmarks (`./run.sh`).

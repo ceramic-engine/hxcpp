@@ -68,7 +68,7 @@ void ArrayBase::reserve(int inSize) const
       mAlloc = inSize;
       HX_OBJ_WB_GET(const_cast<ArrayBase *>(this),mBase);
       // Old elements were bulk-copied without barriers
-      HX_OBJ_WB_FUTURE_BULK(const_cast<ArrayBase *>(this));
+      HX_OBJ_WB_CONCURRENT_BULK(const_cast<ArrayBase *>(this));
    }
 }
 
@@ -125,7 +125,7 @@ void ArrayBase::Realloc(int inSize) const
       mAlloc = bytes/elemSize;
       HX_OBJ_WB_GET(const_cast<ArrayBase *>(this),mBase);
       // Old elements were bulk-copied without barriers
-      HX_OBJ_WB_FUTURE_BULK(const_cast<ArrayBase *>(this));
+      HX_OBJ_WB_CONCURRENT_BULK(const_cast<ArrayBase *>(this));
    }
 }
 
@@ -253,7 +253,7 @@ void ArrayBase::__SetSizeExact(int inSize)
       }
       mAlloc = length = inSize;
       HX_OBJ_WB_GET(this,mBase);
-      HX_OBJ_WB_FUTURE_BULK(this);
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 }
 
@@ -281,7 +281,7 @@ void ArrayBase::Insert(int inPos)
       int s = GetElementSize();
       memmove(mBase + inPos*s + s, mBase+inPos*s, (length-inPos-1)*s );
       // Elements moved without per-store barriers
-      HX_OBJ_WB_FUTURE_BULK(this);
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 }
 
@@ -311,7 +311,7 @@ void ArrayBase::Splice(ArrayBase *outResult,int inPos,int inLen)
       HX_OBJ_WB_PESSIMISTIC_GET(outResult);
    }
    memmove(mBase+inPos*s, mBase + (inPos+inLen)*s, (length-(inPos+inLen))*s);
-   HX_OBJ_WB_FUTURE_BULK(this);
+   HX_OBJ_WB_CONCURRENT_BULK(this);
    resize(length-inLen);
 }
 
@@ -347,7 +347,7 @@ void ArrayBase::RemoveElement(int inPos)
       int s = GetElementSize();
       memmove(mBase + inPos*s, mBase+inPos*s + s, (length-inPos-1)*s );
       resize(length-1);
-      HX_OBJ_WB_FUTURE_BULK(this);
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 
 }

@@ -386,7 +386,7 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       HX_OBJ_WB_GET(this, bucket);
       // The relinking below moves elements without per-store barriers - a
       //  concurrent marker scan may see a torn view, so force a remark re-scan
-      HX_OBJ_WB_FUTURE_BULK(this);
+      HX_OBJ_WB_CONCURRENT_BULK(this);
       //for(int b=bucketCount;b<inNewCount;b++)
       //   bucket[b] = 0;
 
@@ -452,7 +452,7 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       bucketCount = newSize;
       bucket = (Element **)InternalRealloc(origSize*sizeof(ELEMENT *),bucket, sizeof(ELEMENT *)*bucketCount );
       HX_OBJ_WB_GET(this, bucket);
-      HX_OBJ_WB_FUTURE_BULK(this);
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 
    bool remove(Key inKey)
@@ -606,16 +606,16 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       bucket[hash&mask] = el;
 
       #ifdef HXCPP_GC_GENERATIONAL
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
+      #ifdef HXCPP_GC_CONCURRENT
+      if (hx::gConcurrentGcMarkActive)
       {
          // Concurrent cycle running - make sure the new element, its key and
          //  its value are all shaded (marked + queued for scanning)
          hx::StackContext *_hx_fctx = HX_CTX_GET;
-         HX_FUTURE_GC_SHADE_CTX(el,_hx_fctx);
-         HX_FUTURE_GC_SHADE_CTX(hx::PointerOf(el->key),_hx_fctx);
+         HX_GC_CONCURRENT_SHADE_CTX(el,_hx_fctx);
+         HX_GC_CONCURRENT_SHADE_CTX(hx::PointerOf(el->key),_hx_fctx);
          if (hx::ContainsPointers<Value>())
-            HX_FUTURE_GC_SHADE_CTX(hx::PointerOf(el->value),_hx_fctx);
+            HX_GC_CONCURRENT_SHADE_CTX(hx::PointerOf(el->value),_hx_fctx);
       }
       else
       #endif
@@ -817,8 +817,8 @@ struct Hash : public HashBase< typename ELEMENT::Key >
 
       HashMarker marker(__inCtx);
 
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
+      #ifdef HXCPP_GC_CONCURRENT
+      if (hx::gConcurrentGcMarkActive)
       {
          // Concurrent scan may race hash mutation.  Inserts shade their
          //  element/key/value and re-bucketing queues the hash for a remark
