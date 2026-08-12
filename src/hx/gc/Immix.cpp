@@ -2200,6 +2200,65 @@ public:
        marking = 0;
     }
 
+    // Budget-aware variant of processMarkStack, used by the remark pause
+    // inline drain: returns true when the queue was fully drained, false
+    // when the deadline passed with work remaining. The chunk being
+    // processed is handed back to the shared queue, so nothing is lost and
+    // the remark can resume the world and retry concurrently.
+    // (Runs single-threaded on the coordinator, no pool bookkeeping needed.)
+    bool processMarkStackBudgeted(double inDeadline)
+    {
+       int sinceCheck = 0;
+       while(true)
+       {
+          if (!marking || !marking->count)
+          {
+             marking = sGlobalChunks.popJobOrFinish(marking,mThreadId);
+             if (!marking)
+                return true;
+
+             if (__hxcpp_time_stamp() > inDeadline)
+             {
+                // Deadline passed before starting the next job: hand it back
+                sGlobalChunks.pushJob(marking,false);
+                marking = 0;
+                return false;
+             }
+
+             if (marking->count==MarkChunk::OBJ_ARRAY_JOB)
+             {
+                int n = marking->arrayElements;
+                hx::Object **elems = marking->arrayBase;
+                marking->count = 0;
+                MarkObjectArray(elems, n, this);
+                continue;
+             }
+          }
+
+          while(marking)
+          {
+             if (++sinceCheck >= 64)
+             {
+                sinceCheck = 0;
+                if (__hxcpp_time_stamp() > inDeadline)
+                {
+                   if (marking->count)
+                   {
+                      sGlobalChunks.pushJob(marking,false);
+                      marking = 0;
+                   }
+                   return false;
+                }
+             }
+             hx::Object *obj = marking->pop();
+             if (obj)
+                obj->__Mark(this);
+             else
+                break;
+          }
+       }
+    }
+
     void processMarkStack()
     {
        while(true)
@@ -6162,17 +6221,23 @@ public:
       int queuedChunks = 0;
       for(hx::MarkChunk *c = (hx::MarkChunk *)hx::sGlobalChunks.processList; c && queuedChunks<6; c=c->next)
          queuedChunks++;
+      bool overBudget = false;
       if (queuedChunks<6 && dirtyCount<256)
       {
-         // Too small to bother time-boxing
+         // Small queue: drain inline (waking the worker pool costs
+         //  ~0.1-0.2ms), but still under the time budget - a small chunk
+         //  count can still open deep newly-reachable subgraphs, which
+         //  used to blow way past the budget on slow cores
          mMarker.init();
-         mMarker.processMarkStack();
+         if (inFinal)
+            mMarker.processMarkStack();
+         else
+            overBudget = !mMarker.processMarkStackBudgeted(tDrain0 + sgConcurrentRemarkBudgetMs*0.001);
          mMarker.releaseJobs();
       }
       else
       {
          StartThreadJobs(tpjMark, MAX_GC_THREADS, false);
-         bool overBudget = false;
          while(true)
          {
             if (!sRunningThreads)
@@ -6185,27 +6250,27 @@ public:
             std::this_thread::sleep_for( std::chrono::microseconds(25) );
          }
          StopThreadJobs(overBudget);
+      }
 
-         if (overBudget)
-         {
-            // Too much live data surfaced - resume the world, keep marking
-            //  concurrently (aborted jobs are back on the queue) and retry.
-            // Everything done so far is idempotent; queued objects are
-            //  already marked, so they stay queued across the retry.
-            if (sgConcurrentVerbose)
-               GCLOG("Concurrent GC: remark over budget (%.2fms) - retrying concurrently\n",
-                     (__hxcpp_time_stamp()-tDrain0)*1000.0);
+      if (overBudget)
+      {
+         // Too much live data surfaced - resume the world, keep marking
+         //  concurrently (interrupted jobs are back on the queue) and retry.
+         // Everything done so far is idempotent; queued objects are
+         //  already marked, so they stay queued across the retry.
+         if (sgConcurrentVerbose)
+            GCLOG("Concurrent GC: remark over budget (%.2fms) - retrying concurrently\n",
+                  (__hxcpp_time_stamp()-tDrain0)*1000.0);
 
-            for(int i=0;i<mLocalAllocs.size();i++)
-               ((hx::StackContext *)mLocalAllocs[i])->mOldReferrers = hx::sGlobalChunks.alloc();
+         for(int i=0;i<mLocalAllocs.size();i++)
+            ((hx::StackContext *)mLocalAllocs[i])->mOldReferrers = hx::sGlobalChunks.alloc();
 
-            sgIsCollecting = false;
-            hx::gPauseForCollect = 0x00000000;
-            for(int i=0;i<mLocalAllocs.size();i++)
-               ReleaseFromSafe(mLocalAllocs[i]);
-            gThreadStateChangeLock->unlock();
-            return false;
-         }
+         sgIsCollecting = false;
+         hx::gPauseForCollect = 0x00000000;
+         for(int i=0;i<mLocalAllocs.size();i++)
+            ReleaseFromSafe(mLocalAllocs[i]);
+         gThreadStateChangeLock->unlock();
+         return false;
       }
 
       double tFinal0 = __hxcpp_time_stamp();
