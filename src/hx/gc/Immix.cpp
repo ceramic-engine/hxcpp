@@ -7895,6 +7895,24 @@ void InitAlloc()
    #ifdef HXCPP_GC_CONCURRENT_VERBOSE
    sgConcurrentVerbose = true;
    #endif
+   // Compile-time tuning (same clamps as the environment variables below,
+   // which still take precedence at runtime when available)
+   #ifdef HXCPP_GC_CONCURRENT_MARK_THREADS
+   if (HXCPP_GC_CONCURRENT_MARK_THREADS>0 && HXCPP_GC_CONCURRENT_MARK_THREADS<=MAX_GC_THREADS)
+      sgConcurrentMarkThreads = HXCPP_GC_CONCURRENT_MARK_THREADS;
+   #endif
+   #ifdef HXCPP_GC_CONCURRENT_TRIGGER
+   if (HXCPP_GC_CONCURRENT_TRIGGER>0.1 && HXCPP_GC_CONCURRENT_TRIGGER<0.95)
+      sgConcurrentTriggerRatio = HXCPP_GC_CONCURRENT_TRIGGER;
+   #endif
+   #ifdef HXCPP_GC_CONCURRENT_NURSERY_MB
+   if (HXCPP_GC_CONCURRENT_NURSERY_MB>0 && HXCPP_GC_CONCURRENT_NURSERY_MB<4096)
+      sgConcurrentNurseryBudget = (size_t)(HXCPP_GC_CONCURRENT_NURSERY_MB)*1024*1024;
+   #endif
+   #ifdef HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS
+   if (HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS>=0.5 && HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS<1000)
+      sgConcurrentRemarkBudgetMs = HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS;
+   #endif
    #if !defined(HX_WINRT) && !defined(__SNC__) && !defined(__ORBIS__)
    if (const char *threads = getenv("HXCPP_GC_CONCURRENT_MARK_THREADS"))
    {

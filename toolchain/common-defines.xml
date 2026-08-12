@@ -30,6 +30,10 @@
  <flag value="-DHXCPP_GC_NURSERY" if="HXCPP_GC_NURSERY" tag="haxe" />
  <flag value="-DHXCPP_GC_CONCURRENT" if="HXCPP_GC_CONCURRENT" tag="haxe" />
  <flag value="-DHXCPP_GC_CONCURRENT_VERBOSE" if="HXCPP_GC_CONCURRENT_VERBOSE" tag="haxe" />
+ <flag value="-DHXCPP_GC_CONCURRENT_MARK_THREADS=${removeQuotes:HXCPP_GC_CONCURRENT_MARK_THREADS}" if="HXCPP_GC_CONCURRENT_MARK_THREADS" tag="haxe" />
+ <flag value="-DHXCPP_GC_CONCURRENT_TRIGGER=${removeQuotes:HXCPP_GC_CONCURRENT_TRIGGER}" if="HXCPP_GC_CONCURRENT_TRIGGER" tag="haxe" />
+ <flag value="-DHXCPP_GC_CONCURRENT_NURSERY_MB=${removeQuotes:HXCPP_GC_CONCURRENT_NURSERY_MB}" if="HXCPP_GC_CONCURRENT_NURSERY_MB" tag="haxe" />
+ <flag value="-DHXCPP_GC_CONCURRENT_REMARK_BUDGET_MS=${removeQuotes:HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS}" if="HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS" tag="haxe" />
  <flag value="-DHXCPP_DLL_IMPORT" if="dll_import" tag="haxe" />
  <flag value="-I${dll_import_include}" if="dll_import_include" tag="haxe" />
  <flag value="-DHXCPP_DLL_EXPORT" if="dll_export||dll_link" tag="haxe" />
