@@ -944,6 +944,22 @@ void CppiaClassInfo::linkTypes()
    if (!haxeBase && !isInterface)
       throw "No base defined for non-interface";
 
+   // A script class extending a native class whose scriptable registration
+   // is missing (@:nativeGen, dce'd glue, class compiled without
+   // -D scriptable...) silently falls back to the hx.Object base: the
+   // script fields then overlap the native fields and the created object
+   // is not an instance of the native class - undefined behaviour that
+   // shows up later as impossible-looking bugs. Fail loudly instead.
+   if (!cppiaSuper && superType && superType->haxeClass.mPtr
+         && haxeBase == HaxeNativeClass::hxObject()
+         && superType->name != HX_CSTRING("hx.Object")
+         && superType->name != HX_CSTRING("Dynamic"))
+   {
+      CPPIALOG("Error: script class '%s' extends native class '%s' which is not registered as scriptable in the host\n",
+            type->name.out_str(), superType->name.out_str());
+      throw "Native base class not scriptable";
+   }
+
    classSize = haxeBase ? haxeBase->mDataOffset : 0;
 
    // Combine member vars ...
