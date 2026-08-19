@@ -196,6 +196,9 @@ void CppiaVar::linkVarTypes(CppiaModule &cppia, int &ioOffset)
 void CppiaVar::createDynamic(hx::Object *inBase)
 {
    *(hx::Object **)((char *)inBase+offset) = createMemberClosure(inBase,(ScriptCallable*)dynamicFunction->funExpr);
+   #ifdef HXCPP_GC_GENERATIONAL
+   HX_OBJ_WB_PESSIMISTIC_GET(inBase);
+   #endif
 }
 
 
@@ -220,14 +223,24 @@ Dynamic CppiaVar::getValue(hx::Object *inThis)
 Dynamic CppiaVar::setValue(hx::Object *inThis, Dynamic inValue)
 {
    char *base = ((char *)inThis) + offset;
- 
+
+   // The stores below write GC pointers (string data, array pointers,
+   // object pointers) into inThis: the generational/concurrent collectors
+   // need a write barrier, like any compiler-generated field write. The
+   // pessimistic variant is used because the value type varies.
+   #ifdef HXCPP_GC_GENERATIONAL
+   #define CPPIA_SETVALUE_WB HX_OBJ_WB_PESSIMISTIC_GET(inThis);
+   #else
+   #define CPPIA_SETVALUE_WB
+   #endif
+
    switch(storeType)
    {
       case fsByte: *(unsigned char *)(base) = inValue; return inValue;
       case fsInt: *(int *)(base) = inValue; return inValue;
       case fsBool: *(bool *)(base) = inValue; return inValue;
       case fsFloat: *(Float *)(base) = inValue; return inValue;
-      case fsString: *(String *)(base) = inValue; return inValue;
+      case fsString: *(String *)(base) = inValue; CPPIA_SETVALUE_WB return inValue;
       case fsObject:
             switch(type->arrayType)
             {
@@ -259,10 +272,12 @@ Dynamic CppiaVar::setValue(hx::Object *inThis, Dynamic inValue)
                   *(Array<Dynamic> *)(base) = inValue;
                   break;
             }
+            CPPIA_SETVALUE_WB
             return inValue;
       case fsUnknown:
          break;
    }
+   #undef CPPIA_SETVALUE_WB
    return null();
 }
 
