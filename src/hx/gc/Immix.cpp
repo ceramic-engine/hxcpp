@@ -9,6 +9,9 @@
 #include <hx/Unordered.h>
 #include <mutex>
 #include <thread>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <condition_variable>
 
 #ifdef EMSCRIPTEN
@@ -226,7 +229,7 @@ static bool sGcVerifyGenerational = false;
 
 
 #if HX_HAS_ATOMIC && (HXCPP_GC_DEBUG_LEVEL==0) && !defined(HXCPP_GC_VERIFY) && !defined(EMSCRIPTEN)
-  #if defined(HX_MACOS) || defined(HX_WINDOWS) || defined(HX_LINUX)
+  #if defined(HX_MACOS) || defined(HX_WINDOWS) || defined(HX_LINUX) || defined(IPHONE) || defined(ANDROID)
   enum { MAX_GC_THREADS = 4 };
   #else
   enum { MAX_GC_THREADS = 2 };
@@ -675,6 +678,13 @@ static double sgConcurrentLastPublishMs = 0;
 static double sgConcurrentMaxPublishMs = 0;
 static double sgConcurrentTriggerRatio = 0.7;
 
+// Work distribution for tpjClearRemembered: a snapshot of the remembered-set
+// chunk list, claimed chunk by chunk with an atomic cursor. Only touched
+// while the world is stopped (quick-start pause), before the cycle starts,
+// so the pool is idle and the list is stable.
+static std::vector<hx::MarkChunk *> sgClearRememberedChunks;
+static volatile int sgClearRememberedIndex = 0;
+
 static inline unsigned char *ConcurrentShadowRow(size_t inPtr)
 {
    int blockId = *(BlockIdType *)(inPtr & IMMIX_BLOCK_BASE_MASK);
@@ -710,6 +720,7 @@ enum ThreadPoolJob
 {
    tpjNone,
    tpjMark,
+   tpjClearRemembered,
    tpjReclaim,
    tpjReclaimFull,
    tpjCountRows,
@@ -4945,8 +4956,37 @@ public:
    }
 
 
+   static inline void ClearRememberedChunk(hx::MarkChunk *c)
+   {
+      int count = c->count;
+      for(int i=0;i<count;i++)
+         ((unsigned char *)c->stack[i])[HX_ENDIAN_MARK_ID_BYTE] &= ~HX_GC_REMEMBERED;
+   }
+
+   void ClearRememberedAsync()
+   {
+      // Chunks are claimed with an atomic cursor; every object's mark byte
+      //  appears at most once (the remembered bit dedups at enqueue), so the
+      //  byte writes are disjoint and need no further synchronisation.
+      int count = (int)sgClearRememberedChunks.size();
+      while(true)
+      {
+         int idx = _hx_atomic_add(&sgClearRememberedIndex, 1);
+         if (idx >= count)
+            break;
+         ClearRememberedChunk(sgClearRememberedChunks[idx]);
+      }
+   }
+
    void ThreadLoop(int inId)
    {
+      #ifdef __APPLE__
+      // Without an explicit QoS the pool threads are scheduled on the
+      //  efficiency cores, which defeats parallel pause work (the world is
+      //  stopped, the performance cores are idle precisely then)
+      pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+      #endif
+
       hx::MarkContext context(inId);
 
       #ifdef HXCPP_TRACY
@@ -4995,6 +5035,9 @@ public:
 
             else if (sgThreadPoolJob==tpjAsyncZero)
                ZeroAsync();
+
+            else if (sgThreadPoolJob==tpjClearRemembered)
+               ClearRememberedAsync();
 
             finishThreadJob(inId);
          }
@@ -5406,6 +5449,7 @@ public:
 
             // Hand the remembered set to the concurrent markers, clearing
             //  the remembered bits so the pessimistic barrier stays armed
+            double tQsHandoff0 = __hxcpp_time_stamp();
             for(int i=0;i<mLocalAllocs.size();i++)
             {
                hx::StackContext *ctx = (hx::StackContext *)mLocalAllocs[i];
@@ -5418,11 +5462,38 @@ public:
                   ctx->mOldReferrers = 0;
                }
             }
-            for(hx::MarkChunk *c = (hx::MarkChunk *)hx::sGlobalChunks.processList; c; c=c->next)
-               for(int i=0;i<c->count;i++)
-                  ((unsigned char *)c->stack[i])[HX_ENDIAN_MARK_ID_BYTE] &= ~HX_GC_REMEMBERED;
+            double tQsClear0 = __hxcpp_time_stamp();
+            int qsClearedObjects = 0;
+            int qsClearedChunks = 0;
 
+            // On a heavily mutating scene the remembered set holds tens of
+            //  thousands of objects and these scattered byte writes dominate
+            //  the whole pause: split the chunks across the worker pool
+            //  (idle here - the cycle has not started). Below a few chunks,
+            //  waking the pool (~0.1-0.2ms) costs more than the clear.
+            sgClearRememberedChunks.clear();
+            for(hx::MarkChunk *c = (hx::MarkChunk *)hx::sGlobalChunks.processList; c; c=c->next)
+            {
+               sgClearRememberedChunks.push_back(c);
+               qsClearedObjects += c->count;
+            }
+            qsClearedChunks = (int)sgClearRememberedChunks.size();
+
+            if (qsClearedChunks < 8)
+            {
+               for(int j=0;j<qsClearedChunks;j++)
+                  ClearRememberedChunk(sgClearRememberedChunks[j]);
+            }
+            else
+            {
+               sgClearRememberedIndex = 0;
+               StartThreadJobs(tpjClearRemembered, MAX_GC_THREADS, true);
+            }
+            sgClearRememberedChunks.clear();
+
+            double tQsStart0 = __hxcpp_time_stamp();
             ConcurrentGcStartCycleLocked();
+            double tQsStart1 = __hxcpp_time_stamp();
 
             for(int i=0;i<mLocalAllocs.size();i++)
                ((hx::StackContext *)mLocalAllocs[i])->mOldReferrers = hx::sGlobalChunks.alloc();
@@ -5432,7 +5503,13 @@ public:
             #endif
 
             if (sgConcurrentVerbose)
-               GCLOG("Concurrent GC: quick-start pause %.3fms\n", (__hxcpp_time_stamp()-concurrentT0)*1000.0);
+               GCLOG("Concurrent GC: quick-start pause %.3fms (stop=%.3f handoff=%.3f clear=%.3f(%d obj/%d chunks) startCycle=%.3f)\n",
+                     (__hxcpp_time_stamp()-concurrentT0)*1000.0,
+                     (tQsHandoff0-concurrentT0)*1000.0,
+                     (tQsClear0-tQsHandoff0)*1000.0,
+                     (tQsStart0-tQsClear0)*1000.0,
+                     qsClearedObjects, qsClearedChunks,
+                     (tQsStart1-tQsStart0)*1000.0);
 
             sgIsCollecting = false;
             hx::gPauseForCollect = 0x00000000;
