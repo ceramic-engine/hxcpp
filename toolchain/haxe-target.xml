@@ -88,7 +88,7 @@
      <depend name="${HXCPP}/hxcpp.n" ifExists="${HXCPP}/hxcpp.n"  dateOnly="true" />
   </section>
 </files>
- 
+
 
 
 <!-- Additional dependencies for haxe target -->
@@ -161,7 +161,7 @@
   <compilerflag value="-DTRACY_NO_EXIT" if="HXCPP_TRACY_NO_EXIT"/>
   <compilerflag value="-DTRACY_ON_DEMAND" if="HXCPP_TRACY_ON_DEMAND"/>
 
-  <file name="project/thirdparty/tracy-0.12.0/TracyClient.cpp"/>
+  <file name="project/thirdparty/tracy-0.13.1/TracyClient.cpp"/>
   <cache value="1" project="hxcpp-tracy" asLibrary="true" />
 </files>
 
@@ -172,7 +172,6 @@
   <depend name="${HXCPP}/src/hx/Unicase.h"/>
   <depend name="${HXCPP}/src/hx/gc/GcRegCapture.h"/>
   <depend name="${HXCPP}/src/hx/thread/ThreadImpl.hpp"/>
-  <compilerflag value="-D_CRT_SECURE_NO_DEPRECATE"/>
 
   <compilerflag value="-DHX_UNDEFINE_H" />
 
@@ -196,7 +195,7 @@
     <file name = "src/hx/TelemetryTracy.cpp" if="HXCPP_TRACY"/>
     <file name = "src/hx/Telemetry.cpp" unless="HXCPP_TRACY"/>
   </section>
-  
+
   <file name = "src/hx/Profiler.cpp" if="HXCPP_PROFILER" />
   <file name = "src/hx/Thread.cpp"/>
   <file name = "src/hx/RunLibs.cpp" if="static_link||dll_link"/>
@@ -210,9 +209,7 @@
   <file name = "src/Math.cpp"/>
   <file name = "src/String.cpp" tags="haxe,hxstring" />
 
-  <file name = "src/cpp/encoding/Ascii.cpp"/>
-  <file name = "src/cpp/encoding/Utf8.cpp"/>
-  <file name = "src/cpp/encoding/Utf16.cpp"/>
+  <file name = "src/cpp/encoding/Encodings.cpp" />
 
   <include name="${HXCPP_THREAD_XML}"/>
 
@@ -285,5 +282,3 @@
 
 
 </xml>
-
-

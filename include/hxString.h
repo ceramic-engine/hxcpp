@@ -42,6 +42,7 @@ public:
    inline String(const char16_t *inPtr) { *this = create(inPtr); }
    inline String(const char *inPtr) { *this = create(inPtr); }
 
+   // If inLen is -1, the input string is treated as null terminated.
    static String create(const wchar_t *inPtr,int inLen=-1);
    static String create(const char16_t *inPtr,int inLen=-1);
    static String create(const char *inPtr,int inLen=-1);
@@ -240,13 +241,13 @@ public:
          #endif
          if (__s[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT)
          {
-            #ifdef EMSCRIPTEN
+            #ifdef __EMSCRIPTEN__
             return  ((emscripten_align1_int*)__s)[-2];
             #else
             return  ((unsigned int *)__s)[-2];
             #endif
          }
-        #ifdef EMSCRIPTEN
+        #ifdef __EMSCRIPTEN__
            return *((emscripten_align1_int *)(__s+length+1) );
         #else
            return *((unsigned int *)(__s+length+1) );
@@ -374,6 +375,9 @@ public:
 
    // This is used by the string-wrapped-as-dynamic class
    hx::Val __Field(const ::String &inString, hx::PropertyAccess inCallProp);
+
+   // Allows for reflection to be able to get the static functions
+   static bool __GetStatic(const String&, Dynamic&, hx::PropertyAccess);
 
    // The actual implementation.
    // Note that "__s" is const - if you want to change it, you should create a new string.

@@ -14,7 +14,7 @@
 #endif
 #include <condition_variable>
 
-#ifdef EMSCRIPTEN
+#ifdef __EMSCRIPTEN__
    #include <emscripten/stack.h>
    #ifdef HXCPP_SINGLE_THREADED_APP
       // Use provided tools to measure stack extent
@@ -228,7 +228,7 @@ static bool sGcVerifyGenerational = false;
 #endif
 
 
-#if HX_HAS_ATOMIC && (HXCPP_GC_DEBUG_LEVEL==0) && !defined(HXCPP_GC_VERIFY) && !defined(EMSCRIPTEN)
+#if HX_HAS_ATOMIC && (HXCPP_GC_DEBUG_LEVEL==0) && !defined(HXCPP_GC_VERIFY) && !defined(__EMSCRIPTEN__)
   #if defined(HX_MACOS) || defined(HX_WINDOWS) || defined(HX_LINUX) || defined(IPHONE) || defined(ANDROID)
   enum { MAX_GC_THREADS = 4 };
   #else
@@ -434,7 +434,7 @@ static int sgTimeToNextTableUpdate = 1;
 
 
 
-std::mutex *gThreadStateChangeLock=nullptr;
+std::recursive_mutex *gThreadStateChangeLock=nullptr;
 std::mutex *gSpecialObjectLock=nullptr;
 
 class LocalAllocator;
@@ -2851,7 +2851,7 @@ public:
    // Don't mark our ref !
 
    #ifdef HXCPP_VISIT_ALLOCS
-   void __Visit(hx::VisitContext *__inCtx) { HX_VISIT_MEMBER(mRef); }
+   void __Visit(hx::VisitContext *__inCtx) HXCPP_OVERRIDE { HX_VISIT_MEMBER(mRef); }
    #endif
 
    Dynamic mRef;
@@ -3342,8 +3342,8 @@ public:
 
    AllocCounter() { count = 0; }
 
-   void visitObject(hx::Object **ioPtr) { count ++; }
-   void visitAlloc(void **ioPtr) { count ++; }
+   void visitObject(hx::Object **ioPtr) HXCPP_OVERRIDE { count ++; }
+   void visitAlloc(void **ioPtr) HXCPP_OVERRIDE { count ++; }
 };
 
 
@@ -3546,12 +3546,12 @@ public:
    {
       if (!gThreadStateChangeLock)
       {
-         gThreadStateChangeLock = new std::mutex();
+         gThreadStateChangeLock = new std::recursive_mutex();
          gSpecialObjectLock = new std::mutex();
       }
       // Until we add ourselves, the collector will not wait
       //  on us - ie, we are assumed ot be in a GC free zone.
-      std::lock_guard<std::mutex> lock(*gThreadStateChangeLock);
+      std::lock_guard<std::recursive_mutex> lock(*gThreadStateChangeLock);
       mLocalAllocs.push(inAlloc);
       // TODO Attach debugger
    }
@@ -3574,7 +3574,7 @@ public:
 
    LocalAllocator *GetPooledAllocator()
    {
-      std::lock_guard<std::mutex> lock(*gThreadStateChangeLock);
+      std::lock_guard<std::recursive_mutex> lock(*gThreadStateChangeLock);
       for(int p=0;p<LOCAL_POOL_SIZE;p++)
       {
          if (mLocalPool[p])
@@ -4366,7 +4366,7 @@ public:
       public:
          AdjustPointer(GlobalAllocator *inAlloc) : mAlloc(inAlloc) {  }
       
-         void visitObject(hx::Object **ioPtr)
+         void visitObject(hx::Object **ioPtr) HXCPP_OVERRIDE
          {
             if ( ((*(unsigned int **)ioPtr)[-1]) == IMMIX_OBJECT_HAS_MOVED )
             {
@@ -4376,7 +4376,7 @@ public:
             }
          }
 
-         void visitAlloc(void **ioPtr)
+         void visitAlloc(void **ioPtr) HXCPP_OVERRIDE
          {
             if ( ((*(unsigned int **)ioPtr)[-1]) == IMMIX_OBJECT_HAS_MOVED )
             {
@@ -5053,7 +5053,7 @@ public:
    {
       void *info = (void *)(size_t)inId;
 
-      #if defined(EMSCRIPTEN)
+      #if defined(__EMSCRIPTEN__)
          // Only one thread
       #else
          sThreadWake[inId] = new std::condition_variable_any();
@@ -7244,7 +7244,7 @@ public:
          EnterGCFreeZone();
       #endif
 
-      std::lock_guard<std::mutex> lock(*gThreadStateChangeLock);
+      std::lock_guard<std::recursive_mutex> lock(*gThreadStateChangeLock);
 
       #ifdef HX_WINDOWS
       mID = 0;
@@ -7482,7 +7482,7 @@ public:
       if (!mGCFreeZone)
          CriticalGCError("GCFree Zone mismatch");
 
-      std::lock_guard<std::mutex> lock(*gThreadStateChangeLock);
+      std::lock_guard<std::recursive_mutex> lock(*gThreadStateChangeLock);
       mReadyForCollect.Reset();
       mGCFreeZone = false;
       #endif
