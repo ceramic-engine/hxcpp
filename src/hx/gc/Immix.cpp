@@ -4956,6 +4956,7 @@ public:
    }
 
 
+   #ifdef HXCPP_GC_CONCURRENT
    static inline void ClearRememberedChunk(hx::MarkChunk *c)
    {
       int count = c->count;
@@ -4977,6 +4978,7 @@ public:
          ClearRememberedChunk(sgClearRememberedChunks[idx]);
       }
    }
+   #endif // HXCPP_GC_CONCURRENT
 
    void ThreadLoop(int inId)
    {
@@ -5036,8 +5038,10 @@ public:
             else if (sgThreadPoolJob==tpjAsyncZero)
                ZeroAsync();
 
+            #ifdef HXCPP_GC_CONCURRENT
             else if (sgThreadPoolJob==tpjClearRemembered)
                ClearRememberedAsync();
+            #endif
 
             finishThreadJob(inId);
          }
