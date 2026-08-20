@@ -520,10 +520,28 @@ struct IfElseExpr : public CppiaExpr
       BCR_CHECK; \
       return doElse->NAME(ctx); \
    }
-   IF_ELSE_RUN(hx::Object *,runObject)
    IF_ELSE_RUN(int,runInt)
    IF_ELSE_RUN(String,runString)
    IF_ELSE_RUN(Float,runFloat)
+
+   hx::Object *runObject(CppiaCtx *ctx) HXCPP_OVERRIDE
+   {
+      // getType() may report a numeric type (unified from the branches); the
+      // object form must then box that numeric value rather than delegate to
+      // the branch's runObject, which is not guaranteed to box.
+      ExprType t = getType();
+      if (t==etFloat)
+         return Dynamic(runFloat(ctx)).mPtr;
+      if (t==etInt)
+         return Dynamic(runInt(ctx)).mPtr;
+      if (condition->runInt(ctx))
+      {
+         BCR_CHECK;
+         return doIf->runObject(ctx);
+      }
+      BCR_CHECK;
+      return doElse->runObject(ctx);
+   }
 
    #ifdef CPPIA_JIT
    void genCode(CppiaCompiler *compiler, const JitVal &inDest, ExprType destType) HXCPP_OVERRIDE
