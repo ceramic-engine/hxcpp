@@ -8235,7 +8235,13 @@ void TypeData::link(CppiaModule &inModule)
          expressionType = etNull;
       else if (name==HX_CSTRING("String"))
          expressionType = etString;
-      else if (name==HX_CSTRING("Float"))
+      else if (name==HX_CSTRING("Float") || name==HX_CSTRING("cpp.Float32") ||
+               name==HX_CSTRING("cpp.Float64") || name==HX_CSTRING("Single"))
+         // cpp.Float32/Float64 are coreType abstracts over Float: the cppia
+         // interpreter stores them as Float (double), so they are numeric.
+         // Without this they fall through to etObject and arithmetic on them
+         // is wrongly routed through the dynamic add/div path (raw float bits
+         // read as an object pointer -> crash).
          expressionType = etFloat;
       else if (name==HX_CSTRING("Int") || name==HX_CSTRING("Bool"))
          expressionType = etInt;
