@@ -708,6 +708,15 @@ public:
          int size = sTypeSize[var->expressionType];
          memcpy( base+var->capturePos, ctx->frame + var->fromStackPos, size );
       }
+
+      // The closure is allocate-black during a concurrent GC cycle, and the
+      // `this` + captured variables above are copied in raw (bulk memcpy) with
+      // no per-pointer store barrier. Without this, a captured object reachable
+      // only through the closure is a black->white edge and gets swept while
+      // still live (use-after-free when the closure body later reads it).
+      // Force a consistent re-scan of the closure at the remark pause; no-op
+      // when no concurrent cycle is running.
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 
    hx::Object **getThis() const
@@ -721,6 +730,9 @@ public:
    {
       function = inFunction;
       *getThis() = inThis;
+      // Same concurrent-GC hazard as the capturing constructor above: `this`
+      // is stored raw into an allocate-black closure, so re-scan at remark.
+      HX_OBJ_WB_CONCURRENT_BULK(this);
    }
 
 
