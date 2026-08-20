@@ -948,7 +948,14 @@ CppiaExpr *createArrayAnyBuiltin(CppiaExpr *src, CppiaExpr *inThisExpr, String f
    if (field==HX_CSTRING("__get") || field==HX_CSTRING("__unsafe_get"))
       return TCreateArrayAnyBuiltin<af__get>(src, inThisExpr, ioExpressions, field==HX_CSTRING("__unsafe_get"));
    if (field==HX_CSTRING("__set") || field==HX_CSTRING("__unsafe_set"))
-      return TCreateArrayAnyBuiltin<af__set>(src, inThisExpr, ioExpressions, field==HX_CSTRING("__unsafe_set"));
+   {
+      // af__set expects an AssignOp (aoSet), not NoCrement::OP which is a
+      // CrementOp: passing the latter (-1 == aoNone) sends a plain set down
+      // the read-modify-write path, null-checking the slot's original value
+      if (gArrayArgCount[af__set]!=ioExpressions.size())
+         throw "Bad arg count for array builtin";
+      return new ArrayBuiltinAny<af__set,aoSet>(src, inThisExpr, ioExpressions);
+   }
    if (field==HX_CSTRING("__SetSizeExact"))
       return TCreateArrayAnyBuiltin<af__SetSizeExact>(src, inThisExpr, ioExpressions);
    if (field==HX_CSTRING("blit"))
