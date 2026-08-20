@@ -35,6 +35,21 @@ int gLastRet = etVoid;
 
 static bool isNumeric(ExprType t) { return t==etInt || t==etFloat; }
 
+// Evaluate an expression as a boxed Dynamic. When the expression is
+// statically numeric, box the numeric value directly instead of trusting
+// its runObject() (some expressions return the raw value from runObject,
+// which then gets read as an object pointer and crashes). This keeps the
+// dynamic operator paths robust for numeric operands.
+static inline hx::Object *runObjectBoxed(CppiaExpr *inExpr, CppiaCtx *ctx)
+{
+   switch(inExpr->getType())
+   {
+      case etInt:   return Dynamic(inExpr->runInt(ctx)).mPtr;
+      case etFloat: return Dynamic(inExpr->runFloat(ctx)).mPtr;
+      default:      return inExpr->runObject(ctx);
+   }
+}
+
 
 void cppiaClassMark(CppiaClassInfo *inClass,hx::MarkContext *__inCtx);
 void cppiaClassVisit(CppiaClassInfo *inClass,hx::VisitContext *__inCtx);
@@ -7335,9 +7350,9 @@ struct SpecialAdd : public CppiaExpr
    {
       if (AS_DYNAMIC)
       {
-         Dynamic lval = left->runObject(ctx);
+         Dynamic lval = runObjectBoxed(left, ctx);
          BCR_CHECK;
-         return lval + Dynamic(right->runObject(ctx));
+         return lval + Dynamic(runObjectBoxed(right, ctx));
       }
       else
       {
@@ -7350,9 +7365,9 @@ struct SpecialAdd : public CppiaExpr
    {
       if (AS_DYNAMIC)
       {
-         Dynamic lval = left->runObject(ctx);
+         Dynamic lval = runObjectBoxed(left, ctx);
          BCR_CHECK;
-         return (lval + Dynamic(right->runObject(ctx))).mPtr;
+         return (lval + Dynamic(runObjectBoxed(right, ctx))).mPtr;
       }
 
       return Dynamic(runString(ctx)).mPtr;
@@ -7361,9 +7376,9 @@ struct SpecialAdd : public CppiaExpr
    {
       if (AS_DYNAMIC)
       {
-         Dynamic lval = left->runObject(ctx);
+         Dynamic lval = runObjectBoxed(left, ctx);
          BCR_CHECK;
-         return (lval + Dynamic(right->runObject(ctx)))->__ToInt();
+         return (lval + Dynamic(runObjectBoxed(right, ctx)))->__ToInt();
       }
 
       left->runVoid(ctx);
@@ -7375,9 +7390,9 @@ struct SpecialAdd : public CppiaExpr
    {
       if (AS_DYNAMIC)
       {
-         Dynamic lval = left->runObject(ctx);
+         Dynamic lval = runObjectBoxed(left, ctx);
          BCR_CHECK;
-         return (lval + Dynamic(right->runObject(ctx)))->__ToDouble();
+         return (lval + Dynamic(runObjectBoxed(right, ctx)))->__ToDouble();
       }
 
       left->runVoid(ctx);
@@ -7789,9 +7804,9 @@ struct OpCompare : public OpCompareBase
          }
          case compDynamic:
          {
-            Dynamic leftVal(left->runObject(ctx));
+            Dynamic leftVal(runObjectBoxed(left, ctx));
             BCR_CHECK;
-            Dynamic rightVal(right->runObject(ctx));
+            Dynamic rightVal(runObjectBoxed(right, ctx));
             return compare.test(leftVal,rightVal);
          }
       }
