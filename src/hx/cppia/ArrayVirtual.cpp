@@ -960,6 +960,8 @@ CppiaExpr *createArrayAnyBuiltin(CppiaExpr *src, CppiaExpr *inThisExpr, String f
       return TCreateArrayAnyBuiltin<af__SetSizeExact>(src, inThisExpr, ioExpressions);
    if (field==HX_CSTRING("blit"))
       return TCreateArrayAnyBuiltin<afBlit>(src, inThisExpr, ioExpressions);
+   if (field==HX_CSTRING("__SetSize")) // alias of resize
+      return TCreateArrayAnyBuiltin<afResize>(src, inThisExpr, ioExpressions);
    if (field==HX_CSTRING("resize"))
       return TCreateArrayAnyBuiltin<afResize>(src, inThisExpr, ioExpressions);
 

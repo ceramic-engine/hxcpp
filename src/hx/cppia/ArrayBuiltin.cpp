@@ -2182,6 +2182,8 @@ CppiaExpr *createArrayBuiltin(CppiaExpr *src, ArrayType inType, CppiaExpr *inThi
       return TCreateArrayBuiltin<af__SetSizeExact,NoCrement>(src, inType, inThisExpr, ioExpressions);
    if (field==HX_CSTRING("blit"))
       return TCreateArrayBuiltin<afBlit,NoCrement>(src, inType, inThisExpr, ioExpressions);
+   if (field==HX_CSTRING("__SetSize")) // alias of resize
+      return TCreateArrayBuiltin<afResize,NoCrement>(src, inType, inThisExpr, ioExpressions);
    if (field==HX_CSTRING("resize"))
       return TCreateArrayBuiltin<afResize,NoCrement>(src, inType, inThisExpr, ioExpressions);
 
