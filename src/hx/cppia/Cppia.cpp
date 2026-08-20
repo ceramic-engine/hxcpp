@@ -490,6 +490,18 @@ struct IfElseExpr : public CppiaExpr
       return this;
    }
 
+   ExprType getType() HXCPP_OVERRIDE
+   {
+      ExprType t1 = doIf->getType();
+      ExprType t2 = doElse->getType();
+      if (t1==t2)
+         return t1;
+      // Mixed numeric branches unify to float, like the haxe typer does
+      if ((t1==etInt || t1==etFloat) && (t2==etInt || t2==etFloat))
+         return etFloat;
+      return etObject;
+   }
+
    void runVoid(CppiaCtx *ctx) HXCPP_OVERRIDE
    {
       if (condition->runInt(ctx))
@@ -8246,7 +8258,9 @@ void TypeData::link(CppiaModule &inModule)
       else if (name==HX_CSTRING("Int") || name==HX_CSTRING("Bool"))
          expressionType = etInt;
       else
+      {
          expressionType = etObject;
+      }
    }
    else
    {
