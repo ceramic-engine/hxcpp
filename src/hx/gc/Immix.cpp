@@ -663,6 +663,36 @@ static size_t sgConcurrentNurseryBudget = 32*1024*1024;
 static double sgConcurrentRemarkBudgetMs = 4.0;
 static volatile size_t sgConcurrentGrowthCap = 0;
 static bool sgConcurrentVerbose = false;
+// DIAG: mark-completeness verifier. When enabled (env HXCPP_GC_CONCURRENT_VERIFY),
+// the final remark pause runs a second full mark from all roots. In a correct
+// collector this marks nothing new; any object it has to mark was left white by
+// the concurrent pass = a live-but-missed object (the source of cppia UAFs).
+// The second pass logs such objects (and marks them, which also averts the
+// crash). sInConcurrentVerifyPass is set only during that second pass.
+static bool sgConcurrentVerify = false; // DIAG tool: enable with env HXCPP_GC_CONCURRENT_VERIFY
+static volatile bool sInConcurrentVerifyPass = false;
+static FILE *sgConcurrentVerifyFile = 0;
+static int sgConcurrentVerifyCount = 0;
+static void ConcurrentVerifyReport(hx::Object *inPtr)
+{
+   if (!sgConcurrentVerifyFile) sgConcurrentVerifyFile = fopen("/tmp/cppia_gcmiss.log", "w");
+   if (!sgConcurrentVerifyFile || sgConcurrentVerifyCount >= 800) return;
+   const char *cls = "?";
+   #if (HXCPP_API_LEVEL>=330)
+   hx::Class c = inPtr->__GetClass();
+   if (c.mPtr && c->mName.raw_ptr())
+      cls = c->mName.utf8_str();
+   #endif
+   fprintf(sgConcurrentVerifyFile, "#%d MISSED-OBJ %p class=%s\n", sgConcurrentVerifyCount++, (void*)inPtr, cls);
+   fflush(sgConcurrentVerifyFile);
+}
+static void ConcurrentVerifyReportRaw(void *inPtr, int inSize)
+{
+   if (!sgConcurrentVerifyFile) sgConcurrentVerifyFile = fopen("/tmp/cppia_gcmiss.log", "w");
+   if (!sgConcurrentVerifyFile || sgConcurrentVerifyCount >= 800) return;
+   fprintf(sgConcurrentVerifyFile, "#%d MISSED-RAW %p size=%d\n", sgConcurrentVerifyCount++, inPtr, inSize);
+   fflush(sgConcurrentVerifyFile);
+}
 // Set during the remark pause: per-block jobs copy shadow row marks into
 //  place before counting/reclaiming
 static bool sgConcurrentSwapShadow = false;
@@ -2411,6 +2441,13 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
    size_t ptr_i = ((size_t)inPtr)-sizeof(int);
    unsigned int flags =  *((unsigned int *)ptr_i);
 
+   #ifdef HXCPP_GC_CONCURRENT
+   // Verify pass: a raw alloc (string buffer / array data) reached from roots
+   // yet left white by the concurrent mark = missed. Report (and it gets marked).
+   if (sInConcurrentVerifyPass)
+      ConcurrentVerifyReportRaw(inPtr, (int)(flags & 0xffff));
+   #endif
+
    #ifdef HXCPP_GC_NURSERY
    if (!(flags & 0xff000000))
    {
@@ -2514,6 +2551,12 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
 
 void MarkObjectAllocUnchecked(hx::Object *inPtr,hx::MarkContext *__inCtx)
 {
+   #ifdef HXCPP_GC_CONCURRENT
+   // Reaching here during the verify pass means this reachable object was left
+   // white by the concurrent mark (its callers gate out already-marked objects).
+   if (sInConcurrentVerifyPass)
+      ConcurrentVerifyReport(inPtr);
+   #endif
    size_t ptr_i = ((size_t)inPtr)-sizeof(int);
    unsigned int flags =  *((unsigned int *)ptr_i);
    #ifdef HXCPP_GC_NURSERY
@@ -6354,6 +6397,48 @@ public:
          return false;
       }
 
+      // DIAG: mark-completeness verifier (env HXCPP_GC_CONCURRENT_VERIFY).
+      // Marking is complete here and the world is stopped; re-mark from every
+      // root with the current mark id. Already-marked (correct) objects are
+      // gated out, so a correct collector marks nothing. Any object marked now
+      // was reachable yet left white by the concurrent pass = the bug; it is
+      // logged (and marked, averting the imminent use-after-free).
+      // Reached only on a successful remark (drain completed, not over budget),
+      // i.e. marking is complete for this cycle - so verify every cycle, not
+      // just the rare forced-final attempt.
+      if (sgConcurrentVerify)
+      {
+         static int sVerifyPasses = 0;
+         if ((sVerifyPasses++ % 50) == 0)
+         {
+            static FILE *hb = fopen("/tmp/cppia_gcverify.log", "w");
+            if (hb) { fprintf(hb, "verify pass #%d ran\n", sVerifyPasses); fflush(hb); }
+         }
+         sInConcurrentVerifyPass = true;
+         mMarker.init();
+         mMarker.isGenerational = false;
+         hx::MarkClassStatics(&mMarker);
+         for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+         {
+            hx::Object *&obj = **i;
+            if (obj) hx::MarkObjectAlloc(obj, &mMarker);
+         }
+         if (hx::sgOffsetRootSet)
+            for(hx::OffsetRootSet::iterator i = hx::sgOffsetRootSet->begin(); i!=hx::sgOffsetRootSet->end(); ++i)
+            {
+               char *ptr = *(char **)(i->first);
+               hx::Object *obj = (hx::Object *)(ptr - i->second);
+               if (obj) hx::MarkObjectAlloc(obj, &mMarker);
+            }
+         for(int i=0;i<hx::sZombieList.size();i++)
+            hx::MarkObjectAlloc(hx::sZombieList[i], &mMarker);
+         for(int i=0;i<mLocalAllocs.size();i++)
+            MarkLocalAlloc(mLocalAllocs[i], &mMarker);
+         mMarker.processMarkStack();
+         mMarker.releaseJobs();
+         sInConcurrentVerifyPass = false;
+      }
+
       double tFinal0 = __hxcpp_time_stamp();
       hx::FindZombies(mMarker);
       hx::RunFinalizers();
@@ -8009,6 +8094,8 @@ void InitAlloc()
    }
    if (getenv("HXCPP_GC_CONCURRENT_VERBOSE"))
       sgConcurrentVerbose = true;
+   if (getenv("HXCPP_GC_CONCURRENT_VERIFY"))
+      sgConcurrentVerify = true;
    if (const char *nursery = getenv("HXCPP_GC_CONCURRENT_NURSERY_MB"))
    {
       int mb = atoi(nursery);
