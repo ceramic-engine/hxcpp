@@ -6759,6 +6759,19 @@ public:
 
             BlockDataStats sweepStats;
             ConcurrentSweep(sweepStats, scrub);
+
+            // Pre-zero the shadow slab for the next cycle while this one is still active,
+            //  so that the cycle-start pause does not have to. Not after the publish: the
+            //  next cycle may start as soon as the world resumes and fill the slab (root
+            //  marks, allocate-black rows) or reallocate it, and zeroing it then would wipe
+            //  live row marks or write into freed memory. Nothing reads or writes the slab
+            //  between the sweep and the next cycle start.
+            if (sgConcurrentShadowRows)
+            {
+               ZERO_MEM(sgConcurrentShadowRows, (size_t)sgConcurrentShadowCapacity * IMMIX_LINES);
+               sgConcurrentShadowZeroed = true;
+            }
+
             {
                PROFILE_COLLECT_SUMMARY_START;
                ConcurrentPublish(sweepStats, scrub);
@@ -6781,14 +6794,6 @@ public:
             sgConcurrentAccelerate = false;
             sgConcurrentCycleGen++;
             sgConcurrentWake->notify_all();
-         }
-
-         // Pre-zero the shadow slab while idle so the next cycle-start pause
-         //  does not have to
-         if (sgConcurrentShadowRows)
-         {
-            ZERO_MEM(sgConcurrentShadowRows, (size_t)sgConcurrentShadowCapacity * IMMIX_LINES);
-            sgConcurrentShadowZeroed = true;
          }
       }
    }
