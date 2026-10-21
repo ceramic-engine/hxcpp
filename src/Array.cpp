@@ -436,6 +436,8 @@ void ArrayBase::Concat(ArrayBase *outResult,const char *inSecond,int inLen)
    ptr += n;
    memcpy(ptr,inSecond,inLen*GetElementSize());
    HX_OBJ_WB_PESSIMISTIC_GET(this);
+   // The result gets the references without per-element barriers
+   HX_OBJ_WB_CONCURRENT_BULK(outResult);
 }
 
 

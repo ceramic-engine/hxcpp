@@ -8,7 +8,7 @@
        ::TYPE_DECL::; \
        void __Mark(::hxNS::MarkContext *__inCtx) { ::MARKS:: } \
        void __Visit(::hxNS::VisitContext *__inCtx) { ::VISITS:: } \
-       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: {}::end::
+       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }::end::
 #else
     ::foreach LOCALS::
     #define HX_BEGIN_LOCAL_FUNC_S::ARG::(SUPER,name,::TYPE_ARGS::) \
@@ -16,7 +16,7 @@
        ::TYPE_DECL::; \
        void __Mark(::hxNS::MarkContext *__inCtx) { DoMarkThis(__inCtx); ::MARKS:: } \
        void __Visit(::hxNS::VisitContext *__inCtx) { DoVisitThis(__inCtx); ::VISITS:: } \
-       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: {}::end::
+       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }::end::
 #endif
 
 #define HX_LOCAL_RUN _hx_run

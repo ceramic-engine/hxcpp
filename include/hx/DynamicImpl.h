@@ -24,6 +24,7 @@ struct CMemberFunction0 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -125,6 +126,7 @@ struct CMemberFunction1 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -226,6 +228,7 @@ struct CMemberFunction2 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -327,6 +330,7 @@ struct CMemberFunction3 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -428,6 +432,7 @@ struct CMemberFunction4 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -529,6 +534,7 @@ struct CMemberFunction5 : public hx::Object
    {
       mName = inName;
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
    }
    int __Compare(const hx::Object *inRHS) const HXCPP_OVERRIDE
@@ -1074,6 +1080,7 @@ struct CMemberFunctionVar : public hx::Object
    CMemberFunctionVar(const char *inName,hx::Object *inObj, MemberFunctionVar inFunction,int inN)
    {
       mThis = inObj;
+      HX_OBJ_WB_NEW_MARKED_OBJECT(this);
       mFunction = inFunction;
       mName = inName;
       N = inN;

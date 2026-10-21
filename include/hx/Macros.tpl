@@ -133,7 +133,7 @@ static ::NS::Dynamic __##class##func(const ::NS::Array< ::NS::Dynamic> &inArgs) 
 	    namespace { \
        struct name : public ::hxNS::Object { \
        ::hxNS::ObjectPtr<t0> __this; \
-       name(::hxNS::ObjectPtr<t0> __0 = ::NS::null()) : __this(__0) {} \
+       name(::hxNS::ObjectPtr<t0> __0 = ::NS::null()) : __this(__0) { HX_OBJ_WB_NEW_MARKED_OBJECT(this); } \
        void __Mark(::hxNS::MarkContext *__inCtx) HXCPP_OVERRIDE { HX_MARK_MEMBER(__this); } \
        void __Visit(::hxNS::VisitContext *__inCtx) HXCPP_OVERRIDE { HX_VISIT_MEMBER(__this); }
 #else
@@ -142,7 +142,7 @@ static ::NS::Dynamic __##class##func(const ::NS::Array< ::NS::Dynamic> &inArgs) 
        struct name : public ::hxNS::Object { int __GetType() const HXCPP_OVERRIDE { return vtFunction; } \
        HX_IS_INSTANCE_OF enum { _hx_ClassId = ::hxNS::clsIdClosure }; \
        ::hxNS::ObjectPtr<t0> __this; \
-       name(::hxNS::ObjectPtr<t0> __0 = ::NS::null()) : __this(__0) {} \
+       name(::hxNS::ObjectPtr<t0> __0 = ::NS::null()) : __this(__0) { HX_OBJ_WB_NEW_MARKED_OBJECT(this); } \
        void __Mark(::hxNS::MarkContext *__inCtx) HXCPP_OVERRIDE { HX_MARK_MEMBER(__this); } \
        void __Visit(::hxNS::VisitContext *__inCtx) HXCPP_OVERRIDE { HX_VISIT_MEMBER(__this); }
 #endif
@@ -163,7 +163,7 @@ static ::NS::Dynamic __##class##func(const ::NS::Array< ::NS::Dynamic> &inArgs) 
        ::TYPE_DECL::; \
        void __Mark(::hxNS::MarkContext *__inCtx) override { ::MARKS:: } \
        void __Visit(::hxNS::VisitContext *__inCtx) override { ::VISITS:: } \
-       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: {}::end::
+       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }::end::
 #else
     #define HX_BEGIN_LOCAL_FUNC_S0(SUPER,name) \
        struct name : public SUPER { \
@@ -179,7 +179,7 @@ static ::NS::Dynamic __##class##func(const ::NS::Array< ::NS::Dynamic> &inArgs) 
        ::TYPE_DECL::; \
        void __Mark(::hxNS::MarkContext *__inCtx) HXCPP_OVERRIDE { DoMarkThis(__inCtx); ::MARKS:: } \
        void __Visit(::hxNS::VisitContext *__inCtx) HXCPP_OVERRIDE { DoVisitThis(__inCtx); ::VISITS:: } \
-       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: {}::end::
+       name(::CONSTRUCT_ARGS::) : ::CONSTRUCT_VARS:: { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }::end::
 #endif
 
 #define HX_LOCAL_RUN _hx_run

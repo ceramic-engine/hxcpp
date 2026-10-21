@@ -75,7 +75,7 @@ class ArrayIterator : public cpp::FastIterator_obj<TO>
 public:
    HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdArrayIterator };
 
-   ArrayIterator(Array<FROM> inArray) : mArray(inArray), mIdx(0) { }
+   ArrayIterator(Array<FROM> inArray) : mArray(inArray), mIdx(0) { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }
 
    // Fast versions ...
    bool hasNext() HXCPP_OVERRIDE { return mIdx < mArray->length; }
@@ -103,7 +103,7 @@ class ArrayKeyValueIterator : public cpp::FastIterator_obj<Dynamic>
 public:
    HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdArrayIterator };
 
-   ArrayKeyValueIterator(Array<FROM> inArray) : mArray(inArray), mIdx(0) { }
+   ArrayKeyValueIterator(Array<FROM> inArray) : mArray(inArray), mIdx(0) { HX_OBJ_WB_NEW_MARKED_OBJECT(this); }
 
    bool hasNext() HXCPP_OVERRIDE { return mIdx < mArray->length; }
 
@@ -861,16 +861,22 @@ public:
    }
 
    // Will do random pointer sorting for object pointers
+   // (The sorts move the references through temporaries: a concurrent scan of the array may
+   //  miss one, so the array is scanned again at the remark)
    inline void sortAscending()
    {
       ELEM_ *e = (ELEM_ *)mBase;
       std::sort(e, e+length);
+      if (hx::ContainsPointers<ELEM_>())
+         { HX_OBJ_WB_CONCURRENT_BULK(this); }
    }
    static inline bool greaterThan(const ELEM_ &inA, const ELEM_ &inB) { return inB < inA; }
    inline void sortDescending()
    {
       ELEM_ *e = (ELEM_ *)mBase;
       std::sort(e, e+length, greaterThan);
+      if (hx::ContainsPointers<ELEM_>())
+         { HX_OBJ_WB_CONCURRENT_BULK(this); }
    }
 
 
@@ -894,6 +900,8 @@ public:
    {
       ELEM_ *e = (ELEM_ *)mBase;
       std::sort(e, e+length, Sorter(inSorter) );
+      if (hx::ContainsPointers<ELEM_>())
+         { HX_OBJ_WB_CONCURRENT_BULK(this); }
    }
 
    void sort(SorterFunc inSorter)
@@ -909,6 +917,8 @@ public:
          ELEM_ *e = (ELEM_ *)mBase;
          std::stable_sort(e, e+length, Sorter(inSorter) );
       }
+      if (hx::ContainsPointers<ELEM_>())
+         { HX_OBJ_WB_CONCURRENT_BULK(this); }
    }
 
    Dynamic iterator() { return new hx::ArrayIterator<ELEM_,ELEM_>(this); }
@@ -1211,6 +1221,9 @@ Array<ELEM_> Array_obj<ELEM_>::copy( )
 {
    Array_obj *result = new Array_obj((int)length,0);
    ::memcpy(result->GetBase(),GetBase(),length*sizeof(ELEM_));
+   // The copy gets the references without per-element barriers
+   if (hx::ContainsPointers<ELEM_>())
+      { HX_OBJ_WB_CONCURRENT_BULK(result); }
    return result;
 }
 
