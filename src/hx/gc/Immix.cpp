@@ -1022,6 +1022,9 @@ struct BlockDataInfo
             std::atomic_thread_fence(std::memory_order_release);
          #endif
       }
+      // The zeroed holes and the block state must be visible to the next owner, which may
+      //  run on another core
+      std::atomic_thread_fence(std::memory_order_release);
       mZeroLock = 0;
       return doZero;
    }
@@ -1144,8 +1147,6 @@ struct BlockDataInfo
       mUsedRows = (total & 0xff) + ((total>>8) & 0xff) + ((total>>16)&0xff) + ((total>>24)&0xff);
       mUsedBytes = mUsedRows<<IMMIX_LINE_BITS;
 
-      mZeroLock = 0;
-      mOwned = false;
       outStats.rowsInUse += mUsedRows;
       outStats.bytesInUse += mUsedBytes;
       outStats.fraggedRows += mFraggedRows;
@@ -1176,6 +1177,13 @@ struct BlockDataInfo
       if (left<mMaxHoleSize)
          mMaxHoleSize = left;
       #endif
+
+      // Released last: the concurrent sweep calls this with the mutators running, and an
+      //  allocator may claim the block as soon as it reads it unowned and unlocked. It must
+      //  then see the final state (zeroed, reclaimed, holes), not a stale one.
+      std::atomic_thread_fence(std::memory_order_release);
+      mOwned = false;
+      mZeroLock = 0;
    }
 
    template<bool FULL>
@@ -6570,6 +6578,7 @@ public:
                for(int r=IMMIX_HEADER_LINES;r<IMMIX_LINES;r++)
                   used += rowMarked[r];
                outStats.rowsInUse += used;
+               std::atomic_thread_fence(std::memory_order_release);
                info->mZeroLock = 0;
             }
             else if (inScrub)
@@ -6580,6 +6589,7 @@ public:
                //  hold fresh nursery objects whose rows are unmarked, and a
                //  full reclaim would hand their memory out again.
                info->reclaim<true>(&outStats);
+               std::atomic_thread_fence(std::memory_order_release);
                info->mOwned = false;
                info->mZeroLock = 0;
             }
