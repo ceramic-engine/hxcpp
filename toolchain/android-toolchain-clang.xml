@@ -89,6 +89,9 @@
   <!-- Build time error, not run time -->
   <flag value="-Wl,--no-undefined" unless="HXCPP_ALLOW_UNDEFINED" />
 
+  <!-- Build id: identifies the library of a build in crash reports (symbolication) -->
+  <flag value="-Wl,--build-id=sha1" />
+
   <!-- Disable 16KB page alignment workaround when explicitly requested -->
   <section unless="HXCPP_ANDROID_NO_16K_PAGES">
     <!-- Enable 16KB page size for NDK r27 and below -->
