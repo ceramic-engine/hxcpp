@@ -66,6 +66,7 @@ enum { gAlwaysMove = false };
 #endif
 
 #include <vector>
+#include <algorithm>
 #include <stdio.h>
 
 #include <hx/QuickVec.h>
@@ -3581,6 +3582,7 @@ public:
       memset((void *)mNextFreeBlockOfSize,0,sizeof(mNextFreeBlockOfSize));
       mRowsInUse = 0;
       mLargeAllocated = 0;
+      mLargeSortedValid = false;
       mLargeAllocSpace = 40 << 20;
       mLargeAllocForceRefresh = mLargeAllocSpace;
       // Start at 1 Meg...
@@ -5329,8 +5331,10 @@ public:
       mMarker.isGenerational = inGenerational;
 
       // Mark local stacks
+      SortLargeList();
       for(int i=0;i<mLocalAllocs.size();i++)
          MarkLocalAlloc(mLocalAllocs[i] , &mMarker);
+      mLargeSortedValid = false;
 
       #ifdef PROFILE_COLLECT
       hx::localObjects = sObjectMarks;
@@ -6176,8 +6180,10 @@ public:
       for(int i=0;i<hx::sZombieList.size();i++)
          hx::MarkObjectAlloc(hx::sZombieList[i] , &mMarker );
 
+      SortLargeList();
       for(int i=0;i<mLocalAllocs.size();i++)
          MarkLocalAlloc(mLocalAllocs[i] , &mMarker);
+      mLargeSortedValid = false;
 
       mMarker.releaseJobs();
    }
@@ -6440,8 +6446,10 @@ public:
             }
          for(int i=0;i<hx::sZombieList.size();i++)
             hx::MarkObjectAlloc(hx::sZombieList[i], &mMarker);
+         SortLargeList();
          for(int i=0;i<mLocalAllocs.size();i++)
             MarkLocalAlloc(mLocalAllocs[i], &mMarker);
+         mLargeSortedValid = false;
          mMarker.processMarkStack();
          mMarker.releaseJobs();
          sInConcurrentVerifyPass = false;
@@ -6976,6 +6984,21 @@ public:
       return false;
    }
 
+   // The conservative scan of the stacks looks every pointer-like word up in the large
+   //  object list. A sorted copy turns that into a binary search instead of a walk of the
+   //  whole list, which costs milliseconds per collect once the large objects count in the
+   //  hundreds (most words of a stack are not heap pointers, and each of them walked the
+   //  whole list). Built with the world stopped, right before the stacks are scanned.
+   void SortLargeList()
+   {
+      int count = mLargeList.size();
+      mLargeSorted.resize(count);
+      for(int i=0;i<count;i++)
+         mLargeSorted[i] = mLargeList[i] + 2;
+      std::sort(mLargeSorted.begin(), mLargeSorted.end(), std::less<void *>());
+      mLargeSortedValid = true;
+   }
+
    MemType GetMemType(void *inPtr)
    {
       BlockData *block = (BlockData *)( ((size_t)inPtr) & IMMIX_BLOCK_BASE_MASK);
@@ -6995,6 +7018,12 @@ public:
 
       if (isBlock)
          return memBlock;
+
+      if (mLargeSortedValid)
+      {
+         std::vector<void *>::const_iterator found = std::lower_bound(mLargeSorted.begin(), mLargeSorted.end(), inPtr, std::less<void *>());
+         return (found!=mLargeSorted.end() && *found==inPtr) ? memLarge : memUnmanaged;
+      }
 
       for(int i=0;i<mLargeList.size();i++)
       {
@@ -7031,6 +7060,9 @@ public:
    volatile int mZeroListQueue;
 
    LargeList mLargeList;
+   // Sorted user pointers of mLargeList, valid while the stacks are being scanned
+   std::vector<void *> mLargeSorted;
+   bool mLargeSortedValid;
    std::mutex mLargeListLock;
    hx::QuickVec<LocalAllocator *> mLocalAllocs;
    LocalAllocator *mLocalPool[LOCAL_POOL_SIZE];
