@@ -713,7 +713,7 @@ static double sgConcurrentTriggerRatio = 0.7;
 // chunk list, claimed chunk by chunk with an atomic cursor. Only touched
 // while the world is stopped (quick-start pause), before the cycle starts,
 // so the pool is idle and the list is stable.
-static std::vector<hx::MarkChunk *> sgClearRememberedChunks;
+HX_IMMORTAL(std::vector<hx::MarkChunk *>, sgClearRememberedChunks);
 static volatile int sgClearRememberedIndex = 0;
 
 static inline unsigned char *ConcurrentShadowRow(size_t inPtr)
