@@ -1,0 +1,5 @@
+zwj true 1 2
+fromCharCode true 1 2
+mixed true 1 2
+bmp true 1 2
+stringbuf true 1 2

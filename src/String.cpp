@@ -980,6 +980,13 @@ unsigned int String::calcHash() const
       for(int i=0;i<length;i++)
       {
          int c = __w[i];
+         // A surrogate pair is one code point: hash its UTF-8 bytes, like
+         // the hashes the compiler writes for string literals (HX_W)
+         if (c>=0xD800 && c<=0xDBFF && i+1<length && __w[i+1]>=0xDC00 && __w[i+1]<=0xDFFF)
+         {
+            c = 0x10000 + ((c-0xD800)<<10) + (__w[i+1]-0xDC00);
+            i++;
+         }
          if( c <= 0x7F )
          {
             ADD_HASH(c);
