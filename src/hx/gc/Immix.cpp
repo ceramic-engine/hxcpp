@@ -610,6 +610,12 @@ void CriticalGCError(const char *inMessage)
 
 enum AllocType { allocNone, allocString, allocObject, allocMarked };
 
+// Allocation volume: the bytes of every hole handed to a local allocator
+// (the whole hole counts, even when a collection happens before it is full)
+// plus the large allocations. A cheap allocation-rate measure for benchmarks
+// (memInfo 117); the inline bump allocation path is not touched.
+static volatile size_t sgAllocationVolume = 0;
+
 #ifdef HXCPP_GC_CONCURRENT
 
 // ---  HXCPP_GC_CONCURRENT state --------------------------------------------
@@ -720,11 +726,6 @@ static double sgMinorSweepPrepMs = 0;
 static double sgMinorCycleStartMs = 0;
 static double sgFullPauseCount = 0;
 static double sgFullTotalMs = 0;
-// Allocation volume: the bytes of every hole handed to a local allocator
-// (the whole hole counts, even when a collection happens before it is full)
-// plus the large allocations. A cheap allocation-rate measure for benchmarks
-// (memInfo 117); the inline bump allocation path is not touched.
-static volatile size_t sgAllocationVolume = 0;
 static double sgConcurrentTriggerRatio = 0.7;
 
 // Work distribution for tpjClearRemembered: a snapshot of the remembered-set
@@ -8639,8 +8640,8 @@ double __hxcpp_gc_mem_info(int inWhich)
       case 114: return sgMinorCycleStartMs;
       case 115: return sgFullPauseCount;
       case 116: return sgFullTotalMs;
-      case 117: return (double)sgAllocationVolume;
       #endif
+      case 117: return (double)sgAllocationVolume;
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:
