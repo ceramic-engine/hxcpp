@@ -3129,8 +3129,12 @@ void RunFinalizers()
       if ( mark!=gByteMarkID )
       {
          finalizerCount++;
-         (*i->second)(obj);
+         // Remove the entry before running the finalizer: a finalizer may unregister
+         // itself (ZLibCompress/ZLibUncompress::close() call _hx_set_finalizer(this, nullptr)),
+         // which erased this entry a second time and corrupted the map
+         hx::finalizer finalizer = i->second;
          sFinalizerMap.erase(i);
+         (*finalizer)(obj);
       }
 
       i = next;
@@ -3147,8 +3151,10 @@ void RunFinalizers()
       if ( mark!=gByteMarkID )
       {
          finalizerCount++;
-         (*i->second)(obj);
+         // Same as above: erase first, the finalizer may unregister itself
+         HaxeFinalizer finalizer = i->second;
          sHaxeFinalizerMap.erase(i);
+         (*finalizer)(obj);
       }
 
       i = next;
