@@ -488,8 +488,19 @@ struct StackContext : public hx::ImmixAllocator
          tlmSampleEnter(mTelemetry,inFrame);
       #endif
 
-      mIsUnwindingException = false;
-      mStackFrames.push(inFrame);
+      // A new frame means execution resumed after a throw (a catch that did
+      // not go through beginCatch, native code swallowing the exception):
+      // lock in the exception stack. The flag is only true after a throw,
+      // so the hot path is a load and a branch, not a store.
+      if (mIsUnwindingException)
+         mIsUnwindingException = false;
+
+      // mStackFrames is preallocated when the context is created (see
+      // StackContext::StackContext), so this is a bounds test and two
+      // stores. The growth path stays, out of line, for deeper stacks.
+      if (mStackFrames.mSize >= mStackFrames.mAlloc)
+         growStackFrames();
+      mStackFrames.mPtr[mStackFrames.mSize++] = inFrame;
 
       #ifdef HXCPP_DEBUGGER
       if (sExecutionTrace!=exeTraceOff)
@@ -504,14 +515,18 @@ struct StackContext : public hx::ImmixAllocator
          tlmSampleExit(mTelemetry);
       #endif
 
+      // Only while a thrown exception unwinds the stack: record the frame
+      // in the lazy exception stack. Out of line to keep the destructor
+      // (and the landing pad of every function) small.
       if (mIsUnwindingException)
-      {
-         // Use default operator=
-         mExceptionStack.push( *inFrame );
-      }
+         pushExceptionFrame(inFrame);
 
-      mStackFrames.pop_back();
+      mStackFrames.mSize--;
    }
+
+   // Slow paths of pushFrame and popFrame, defined in Debug.cpp
+   void growStackFrames();
+   void pushExceptionFrame(StackFrame *inFrame);
 
    void getCurrentCallStackAsStrings(Array<String> result, bool skipLast);
    void getCurrentExceptionStackAsStrings(Array<String> result);

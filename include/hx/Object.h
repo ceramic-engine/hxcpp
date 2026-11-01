@@ -345,9 +345,7 @@ public:
    inline OBJ_ *operator->()
    {
       #ifdef HXCPP_CHECK_POINTER
-      if (!mPtr) NullReference("Object", true);
-      // The handler might have fixed up the null value
-      if (!mPtr) NullReference("Object", false);
+      HX_NULL_REFERENCE_IF(!mPtr, "Object");
       #ifdef HXCPP_GC_CHECK_POINTER
          GCCheckPointer(mPtr);
       #endif
@@ -357,9 +355,7 @@ public:
    inline const OBJ_ *operator->() const
    {
       #ifdef HXCPP_CHECK_POINTER
-      if (!mPtr) NullReference("Object", true);
-      // The handler might have fixed up the null value
-      if (!mPtr) NullReference("Object", false);
+      HX_NULL_REFERENCE_IF(!mPtr, "Object");
       #ifdef HXCPP_GC_CHECK_POINTER
          GCCheckPointer(mPtr);
       #endif

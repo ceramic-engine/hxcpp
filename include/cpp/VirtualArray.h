@@ -101,12 +101,7 @@ public:
    inline void checkBase() const
    {
       #ifdef HXCPP_CHECK_POINTER
-      if (store==hx::arrayNull)
-      {
-         hx::NullReference("Array", true);
-         // The handler might have fixed up the null value
-         if (store==hx::arrayNull) hx::NullReference("Array", false);
-      }
+      HX_NULL_REFERENCE_IF(store==hx::arrayNull, "Array");
       #endif
    }
 

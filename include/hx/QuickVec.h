@@ -31,6 +31,15 @@ struct QuickVec
       mPtr[mSize]=inT;
       mSize++;
    }
+   // Make room for at least inAlloc elements without changing the size
+   void reserve(int inAlloc)
+   {
+      if (inAlloc>mAlloc)
+      {
+         mAlloc = inAlloc;
+         mPtr = (T *)realloc(mPtr,sizeof(T)*mAlloc);
+      }
+   }
    void swap(QuickVec<T> &inOther)
    {
       std::swap(mAlloc, inOther.mAlloc);

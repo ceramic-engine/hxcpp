@@ -192,6 +192,9 @@ StackContext::StackContext()
 {
    #ifdef HXCPP_STACK_TRACE
    mIsUnwindingException = false;
+   // Preallocate the frame stack so pushFrame rarely has to grow it. A
+   // StackFrame pointer is 8 bytes: 2 KB per thread.
+   mStackFrames.reserve(256);
    #endif
 
    #ifdef HXCPP_GC_CONCURRENT
@@ -374,6 +377,19 @@ void StackContext::getCurrentExceptionStackAsStrings(Array<String> result)
    }
 }
 
+// Growth path of pushFrame: same policy as QuickVec::push
+void StackContext::growStackFrames()
+{
+   mStackFrames.reserve(10 + (mStackFrames.mSize*3/2));
+}
+
+// Called by popFrame while a thrown exception unwinds the stack
+void StackContext::pushExceptionFrame(StackFrame *inFrame)
+{
+   // Use default operator=
+   mExceptionStack.push( *inFrame );
+}
+
 void StackContext::beginCatch(bool inAll)
 {
    if (inAll)
@@ -479,7 +495,7 @@ ExceptionStackFrame::ExceptionStackFrame(const StackFrame &inFrame)
 #endif // } HXCPP_STACK_TRACE
 
 
-HXCPP_EXTERN_CLASS_ATTRIBUTES void NullReference(const char *type, bool allowFixup)
+HXCPP_EXTERN_CLASS_ATTRIBUTES HX_NULL_REFERENCE_ATTR void NullReference(const char *type, bool allowFixup)
 {
 #ifdef HXCPP_DEBUGGER
    String err(HX_CSTRING("Null ") + String(type) + HX_CSTRING(" Reference"));
@@ -488,6 +504,12 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void NullReference(const char *type, bool allowFix
 #endif
 
    __hxcpp_dbg_checkedThrow(HX_CSTRING("Null Object Reference"));
+
+#ifndef HXCPP_DEBUGGER
+   // The throw above never returns. This keeps the noreturn contract honest
+   // for the compiler instead of falling off the end of the function.
+   abort();
+#endif
 }
 
 

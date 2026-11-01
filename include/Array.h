@@ -1018,9 +1018,7 @@ public:
    #ifdef HXCPP_CHECK_POINTER
    inline OBJ_ *CheckGetPtr() const
    {
-      if (!mPtr) hx::NullReference("Array", true);
-      // The handler might have fixed up the null value
-      if (!mPtr) hx::NullReference("Array", false);
+      HX_NULL_REFERENCE_IF(!mPtr, "Array");
       return mPtr;
    }
    #else

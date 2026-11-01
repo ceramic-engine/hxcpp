@@ -288,7 +288,35 @@ class String;
 namespace hx { HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic Throw(Dynamic inDynamic); }
 namespace hx { HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic Rethrow(Dynamic inDynamic); }
 namespace hx { HXCPP_EXTERN_CLASS_ATTRIBUTES void CriticalError(const String &inError, bool inAllowFixup=false); }
-namespace hx { HXCPP_EXTERN_CLASS_ATTRIBUTES void NullReference(const char *type, bool allowFixup); }
+// NullReference always throws, except in debugger builds where the debugger
+// may fix up the null value and let the function return. Outside the
+// debugger it is declared noreturn and cold, so a null check compiles to one
+// test and one call that the compiler can move out of the hot path.
+#if defined(HXCPP_DEBUGGER)
+   #define HX_NULL_REFERENCE_ATTR
+#elif defined(_MSC_VER)
+   #define HX_NULL_REFERENCE_ATTR __declspec(noreturn)
+#elif defined(__GNUC__) || defined(__clang__)
+   #define HX_NULL_REFERENCE_ATTR __attribute__((noreturn, cold))
+#else
+   #define HX_NULL_REFERENCE_ATTR
+#endif
+namespace hx { HXCPP_EXTERN_CLASS_ATTRIBUTES HX_NULL_REFERENCE_ATTR void NullReference(const char *type, bool allowFixup); }
+
+// Throw a Null Object Reference when `cond` holds. With the debugger, the
+// first call lets the debugger fix the value up, and the second one throws
+// when it did not. Without the debugger the first call never returns, so a
+// single call is enough.
+#ifdef HXCPP_DEBUGGER
+   #define HX_NULL_REFERENCE_IF(cond, type) \
+      do { \
+         if (cond) ::hx::NullReference(type, true); \
+         if (cond) ::hx::NullReference(type, false); \
+      } while (0)
+#else
+   #define HX_NULL_REFERENCE_IF(cond, type) \
+      do { if (cond) ::hx::NullReference(type, true); } while (0)
+#endif
 namespace hx { extern String sNone[]; }
 void __hxcpp_check_overflow(int inVal);
 

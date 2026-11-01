@@ -150,3 +150,24 @@ Solutions:
   - hxcpp will scan native objects on the stack, but will not follow non-haxe pointers to other objects, so additional GC roots may be required.
 
 
+
+
+### Thread context storage
+Each attached thread owns a `hx::StackContext` (its `LocalAllocator`). Generated
+code reaches it through `HX_CTX_GET`, which reads the `hx::tlsStackContext`
+slot declared in `include/hx/Tls.h`. There are two storage implementations:
+
+  - native thread-local storage (`__thread` on gcc and clang, `__declspec(thread)`
+    on MSVC): the read is an inline TLS load, no library call. This is the default
+    on macOS, iOS 9 and later, Linux, Windows (MSVC and MinGW) and Android API 21
+    and later.
+  - `hx::TLSData`, a small wrapper around `pthread_getspecific` / `TlsGetValue`.
+    Used on Emscripten, WinRT, older Apple deployment targets, Windows DLL builds
+    (`dll_import` / `dll_export`, since MSVC does not allow `dllimport` on
+    thread-local data), and everywhere when `-D HXCPP_TLS_PTHREAD` is set.
+
+Both behave the same: the slot is null until the thread registers
+(`hx::SetTopOfStack`, `RegisterCurrentThread`), and it is cleared when the
+`LocalAllocator` is released. The collector does not read other threads'
+slots; it walks `mLocalAllocs`, so attached foreign threads are found either way.
+Every reader and writer goes through the `tlsStackContext` name.
