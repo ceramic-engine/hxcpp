@@ -74,10 +74,58 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
    from the swept blocks (skipping any with a live bump allocator) and the
    memory accounting/growth budgets are updated.
 
-Minor collects are unchanged (already short); between collects the heap may
-grow by a nursery budget (default 32 MB, `HXCPP_GC_CONCURRENT_NURSERY_MB`) before
-a minor is forced — survivors, not nursery size, drive the minor pause, so
-this mostly trades memory for throughput.
+Between collects the heap may grow by a nursery budget (default 32 MB,
+`HXCPP_GC_CONCURRENT_NURSERY_MB`) before a minor is forced. Survivors, not
+nursery size, drive the minor pause, so this mostly trades memory for
+throughput. The budget only binds while the heap is at its cap: a heap that
+grew during concurrent cycles keeps its free blocks, and the minors then come
+when those are used up, whatever the budget.
+
+## Minor collections
+
+A minor collection (`Collect`) is a stop-the-world pause of the allocating
+thread. With `HXCPP_GC_CONCURRENT_VERBOSE` every minor logs its phases:
+
+```
+Concurrent GC: minor pause 1.868ms (stop=0.049 mark=1.499 sweepPrep=0.320 cycleStart=0.000)
+Concurrent GC: minor phases wait=0.000 remembered=0.048(8829) markInit=0.035 statics=0.097
+  roots=0.003 stacks=0.070 mark=1.291 finalizers=0.002 countRows=0.266 large=0.001
+  other=0.000 freeList=0.050 zeroStart=0.003 blocks=8446 free=8331
+```
+
+(times in ms, one line in the log; `remembered` shows the remembered set
+size, `blocks` and `free` the heap and free list sizes in 32 KB blocks)
+
+`stacks` is the conservative scan of the thread stacks, `mark` the marking of
+the survivors with the worker pool, `countRows` the per-block line count of
+the whole heap, `freeList` the rebuild of the free block list. What keeps the
+pause short:
+
+* The collecting thread marks with the pool workers (it drains the shared
+  queue while they wake up) and counts blocks with them, instead of sleeping
+  until they are done. The workers claim blocks to count by batches of 16:
+  one atomic increment per block on the shared cursor cost more than the
+  count itself.
+* The free block list is ordered with a counting sort on the hole size in
+  lines (an exact key), not `std::sort` with a comparison that reads two
+  block headers. The order is the same; equal keys keep the block order.
+* `MarkClassStatics` walks a flat list of the registered classes (rebuilt
+  when a class is registered, in address order) instead of the class map.
+  `mMarkFunc` and `__meta__` are still tested on every walk, since they can
+  be set after registration.
+* Stack values that may point into the nursery (no allocation start bit) are
+  resolved after the stack scan, sorted, one block at a time, so each nursery
+  hole is walked once instead of once per value. The verifier
+  (`HXCPP_GC_CONCURRENT_VERIFY`) checks every answer against the one-value
+  walk.
+
+The nursery fill can be read cheaply, for example to schedule a minor
+between two frames: `Gc.memInfo64(118)` (bytes handed to the allocators
+since the last collection) against `Gc.memInfo64(119)` (room for new objects
+at that collection: free lines plus allowed growth); a minor comes when the
+first reaches the second. Note that an explicit `Gc.run(false)` waits for a
+concurrent cycle when its pause starts one (explicit collects are
+synchronous), so a scheduler must expect that wait.
 
 ## Semantics & compatibility
 
@@ -102,7 +150,10 @@ this mostly trades memory for throughput.
   stopping the world, marking, preparing the sweep and starting a cycle (ms),
   `115` = full collections, `116` = their total pause time (ms), `117` =
   allocation volume in bytes (holes handed to the allocators plus large
-  allocations), for allocation rates.
+  allocations), for allocation rates. Nursery fill: `118` = bytes handed to
+  the allocators since the last collection that rebuilt the free lists,
+  `119` = room for new objects at that collection (a minor comes when `118`
+  reaches `119`).
 
 ## Environment knobs
 
@@ -112,7 +163,7 @@ this mostly trades memory for throughput.
 | `HXCPP_GC_CONCURRENT_TRIGGER` | 0.7 | projected-occupancy ratio that starts a cycle |
 | `HXCPP_GC_CONCURRENT_NURSERY_MB` | 32 | heap growth allowed between minor collects |
 | `HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS` | 4 | remark drain budget before resuming + retrying |
-| `HXCPP_GC_CONCURRENT_VERBOSE` | off | log cycle/pause timings to stdout |
+| `HXCPP_GC_CONCURRENT_VERBOSE` | off | log cycle/pause timings and the minor pause phases to stdout |
 
 ## Tracy
 
@@ -155,6 +206,56 @@ is ordinary frame work colliding with a pause.
 
 Binary-trees (depth 19): 635 ms → 717 ms (+13%).
 Short-lived allocation rate: ~285 M allocs/s in both.
+
+### Minor pause (2026-11-01, M4 Max, other builds running: load 4 to 10)
+
+GPUI port bench (`ceramic-gpui/test/bench`, default Ceramic build with the
+hxcpp checks, 300 frames x 3 runs x 3 alternating processes, the same
+generated C++ linked against each hxcpp; medians):
+
+| Scenario | minor pause before | after | minor time per 300 frames before | after | frame p99 before | after |
+|---|---|---|---|---|---|---|
+| cards full (61 to 63 minors) | 2.50 ms | 1.69 ms | 157.5 ms | 110.3 ms | 21.11 ms | 20.38 ms |
+| hover full (18) | 2.16 ms | 1.21 ms | 38.7 ms | 21.8 ms | 10.13 ms | 9.25 ms |
+| scroll-table full (16) | 2.15 ms | 1.26 ms | 35.1 ms | 20.9 ms | 8.79 ms | 7.67 ms |
+| story-dense full (16 to 17) | 1.98 ms | 1.05 ms | 33.4 ms | 17.8 ms | 9.24 ms | 7.75 ms |
+
+The largest minor pause of a whole bench process went from 3.8 to 4.1 ms down
+to 2.3 to 2.6 ms. Median frame times do not move (within 1 %). Phases of the
+same runs (`HXCPP_GC_CONCURRENT_VERBOSE`, about 470 minors each, median ms):
+
+| Phase | before | after | change |
+|---|---|---|---|
+| whole pause | 2.155 | 1.360 | |
+| statics | 0.132 | 0.100 | flat class list |
+| stacks | 0.150 | 0.102 | sorted nursery lookups |
+| mark | 0.823 | 0.726 | collecting thread marks too |
+| countRows | 0.478 | 0.212 | collecting thread counts too, batched claims |
+| freeList | 0.331 | 0.050 | counting sort |
+
+Each change was measured alone first by alternating it on and off from one
+minor to the next in the same process (same heap, same load): free list
+0.45 to 0.07 ms, row count 0.60 to 0.24 ms (batches and the collecting
+thread both needed: either alone gives 0.46 to 0.48 ms), statics 0.13 to
+0.10 ms, stacks 0.15 to 0.10 ms, mark 1.00 to 0.91 ms (p10 0.54 to 0.40 ms).
+
+Not changed, because the breakdown does not point at them on these
+workloads: finalizers and weak references (0.002 ms), the remembered set
+(0.03 ms for 4000 objects), the cycle start inside a minor (2 minors out of
+500), the block mark clear (0.035 ms). A row count limited to the blocks
+touched since the last minor was tried and dropped: on a GPUI heap every
+block is touched between two minors (the mutator uses the holes of the whole
+heap). `HXCPP_GC_CONCURRENT_NURSERY_MB` 16, 32, 64 and 128 give the same
+minor count and pauses on the GPUI bench: the heap grew during concurrent
+cycles (to about 450 MB for about 100 MB live) and the minors come when its
+free blocks are used up, so the budget does not bind there.
+
+`test/concurrent-gc` (8 alternating runs, medians): GameBench frame p50
+0.260 → 0.255 ms, p99 0.935 → 0.927 ms, p99.9 2.34 → 1.58 ms, max 3.39 →
+2.04 ms (one minor per run; the cycles dominate); Trees 961 → 949 ms;
+AllocRate 107 → 105 ms. GcBench (Ceramic, churn mode, 3 alternating hidden
+runs): work p50 1.06 to 1.11 ms and p99 2.25 to 2.52 ms in both, no dropped
+frame difference.
 
 ## Files
 

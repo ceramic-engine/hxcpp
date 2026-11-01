@@ -1,5 +1,7 @@
 #include <hxcpp.h>
 #include <map>
+#include <vector>
+#include <algorithm>
 
 #ifdef ANDROID
 #include <android/log.h>
@@ -11,6 +13,13 @@ namespace hx
 
 typedef std::map<String,Class> ClassMap;
 static ClassMap *sClassMap = 0;
+
+// The classes of sClassMap as a flat list, in address order, for
+//  MarkClassStatics: walking the map costs a tree step and a cache miss per
+//  class on every collection. Class_obj lives in a const buffer (never moves,
+//  never freed), so the list only goes stale when the map changes.
+static std::vector<Class_obj *> *sClassList = 0;
+static bool sClassListValid = false;
 
 Class _hx_RegisterClass(const String &inClassName, CanCastFunc inCanCast,
                     String inStatics[], String inMembers[],
@@ -42,6 +51,7 @@ Class _hx_RegisterClass(const String &inClassName, CanCastFunc inCanCast,
                                   );
    Class c(obj);
    (*sClassMap)[inClassName] = c;
+   sClassListValid = false;
    return c;
 }
 
@@ -50,6 +60,7 @@ void _hx_RegisterClass(const String &inClassName, Class inClass)
    if (sClassMap==0)
       sClassMap = new ClassMap;
    (*sClassMap)[inClassName] = inClass;
+   sClassListValid = false;
 }
 
 
@@ -120,6 +131,7 @@ void Class_obj::registerScriptable(bool inOverwrite)
    if (!inOverwrite && sClassMap->find(mName)!=sClassMap->end())
       return;
    (*sClassMap)[ mName ] = this;
+   sClassListValid = false;
 }
 
 Class Class_obj::GetSuper()
@@ -322,17 +334,32 @@ void MarkClassStatics(hx::MarkContext *__inCtx)
    #ifdef HXCPP_DEBUG
    MarkPushClass("MarkClassStatics",__inCtx);
    #endif
-   ClassMap::iterator end = sClassMap->end();
-   for(ClassMap::iterator i = sClassMap->begin(); i!=end; ++i)
+   if (!sClassListValid)
    {
-      Class c = i->second;
+      if (!sClassList)
+         sClassList = new std::vector<Class_obj *>();
+      sClassList->clear();
+      sClassList->reserve(sClassMap->size());
+      ClassMap::iterator end = sClassMap->end();
+      for(ClassMap::iterator i = sClassMap->begin(); i!=end; ++i)
+         if (i->second.mPtr)
+            sClassList->push_back(i->second.mPtr);
+      std::sort(sClassList->begin(), sClassList->end());
+      sClassListValid = true;
+   }
+   Class_obj **classes = sClassList->data();
+   int count = (int)sClassList->size();
+   for(int i=0;i<count;i++)
+   {
+      Class_obj *c = classes[i];
+      // mMarkFunc and __meta__ may be set after registration: test them here
       if (c->__meta__.mPtr || c->mMarkFunc)
       {
          #ifdef HXCPP_DEBUG
-         hx::MarkPushClass(i->first.raw_ptr(),__inCtx);
+         hx::MarkPushClass(c->mName.raw_ptr(),__inCtx);
          hx::MarkSetMember("statics",__inCtx);
          #endif
-      
+
          c->MarkStatics(__inCtx);
 
          #ifdef HXCPP_DEBUG

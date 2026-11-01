@@ -615,6 +615,12 @@ enum AllocType { allocNone, allocString, allocObject, allocMarked };
 // plus the large allocations. A cheap allocation-rate measure for benchmarks
 // (memInfo 117); the inline bump allocation path is not touched.
 static volatile size_t sgAllocationVolume = 0;
+// Nursery fill (__hxcpp_gc_mem_info 118 and 119): the allocation volume and
+// the room left for new objects (free lines plus allowed heap growth) at the
+// end of the last collection that rebuilt the free lists. A minor collection
+// happens about when the volume allocated since then reaches that room.
+static size_t sgNurseryVolumeStart = 0;
+static size_t sgNurseryCapacity = 0;
 
 #ifdef HXCPP_GC_CONCURRENT
 
@@ -1481,6 +1487,102 @@ struct BlockDataInfo
 }
    #endif
 
+   #ifdef HXCPP_GC_NURSERY
+   // True when GetAllocType would have to walk the nursery holes
+   inline bool IsNurseryCandidate(int inOffset)
+   {
+      int r = inOffset >> IMMIX_LINE_BITS;
+      if (r < IMMIX_HEADER_LINES || r >= IMMIX_LINES)
+         return false;
+      return !( allocStart[r] & hx::gImmixStartFlag[inOffset &127]) && mZeroed;
+   }
+
+   // GetEnclosingNurseryType for many offsets of this block at once, sorted
+   //  ascending: one walk along each hole instead of one walk from the hole
+   //  start per pointer. Gives the same answers (the walk visits the same
+   //  headers in the same order). outTypes[i] is the type of inOffsets[i].
+   void GetEnclosingNurseryTypes(const int *inOffsets, int inCount, AllocType *outTypes)
+   {
+      int h = 0;
+      // Walk state in hole h: next header position, -1 before the walk of
+      //  the hole starts, -2 when the rest of the hole cannot be walked
+      //  (zero or oversized header)
+      int scan = -1;
+      int last = 0;
+      int i = 0;
+      while(i<inCount)
+      {
+         int offset = inOffsets[i];
+         // Move to the hole that may hold this offset
+         while(h<mHoles && offset >= mRanges[h].start + mRanges[h].length)
+         {
+            h++;
+            scan = -1;
+         }
+         if (h>=mHoles || offset<mRanges[h].start)
+         {
+            outTypes[i++] = allocNone;
+            continue;
+         }
+         if (scan==-1)
+         {
+            scan = mRanges[h].start;
+            last = scan + mRanges[h].length;
+            #ifdef HXCPP_ALIGN_ALLOC
+            if (!(scan & 0x4))
+               scan += 4;
+            #endif
+         }
+         if (scan==-2)
+         {
+            outTypes[i++] = allocNone;
+            continue;
+         }
+
+         AllocType result = allocNone;
+         while(scan<=offset)
+         {
+            unsigned int header = *(unsigned int *)(mPtr->mRow[0]+scan);
+            int size;
+            if (!(header & 0xff000000))
+               size = header & 0x0000ffff;
+            else
+               size = (header & IMMIX_ALLOC_SIZE_MASK) >> IMMIX_ALLOC_SIZE_SHIFT;
+
+            int end = scan+size+sizeof(int);
+            if (!size || end > last)
+            {
+               // The rest of this hole is not walkable
+               scan = -2;
+               break;
+            }
+
+            if (offset>=scan && offset<end)
+            {
+               // Stay on this object: the next offset may point into it too
+               if (offset>scan+sgCheckInternalOffset)
+                  break;
+
+               if (header & IMMIX_ALLOC_IS_CONTAINER)
+               {
+                  void **vtable = (void **)(mPtr->mRow[0] + scan + sizeof(int));
+                  result = vtable[0]==0 ? allocString : allocObject;
+               }
+               else
+                  result = allocString;
+               break;
+            }
+            scan = end;
+            #ifdef HXCPP_ALIGN_ALLOC
+            if (!(scan & 0x4))
+               scan += 4;
+            #endif
+         }
+         outTypes[i++] = result;
+      }
+   }
+   #endif
+
    AllocType GetAllocType(int inOffset,bool inAllowPrevious)
    {
       // Row that the header would be on
@@ -2322,6 +2424,55 @@ public:
              hx::Object *obj = marking->pop();
              if (obj)
                 obj->__Mark(this);
+             else
+                break;
+          }
+       }
+    }
+
+    // The collecting thread helps the pool mark instead of sleeping until the
+    //  workers are done: it drains the shared queue while the workers wake
+    //  up and whenever chunks are queued. It is not part of the pool
+    //  completion protocol (sRunningThreads): it returns as soon as the queue
+    //  is empty, and the caller then joins the pool and drains any leftover.
+    void processMarkStackHelper()
+    {
+       while(true)
+       {
+          if (!marking || !marking->count)
+          {
+             marking = sGlobalChunks.popJobLocked(marking);
+             if (!marking)
+                return;
+
+             if (marking->count==MarkChunk::OBJ_ARRAY_JOB)
+             {
+                int n = marking->arrayElements;
+                hx::Object **elems = marking->arrayBase;
+                marking->count = 0;
+                MarkObjectArray(elems, n, this);
+                continue;
+             }
+          }
+
+          while(marking)
+          {
+             hx::Object *obj = marking->pop();
+             if (obj)
+             {
+                obj->__Mark(this);
+                #ifdef HX_MULTI_THREAD_MARKING
+                // Load balance
+                if (sLazyThreads && marking->count>32)
+                {
+                   MarkChunk *c = sGlobalChunks.alloc();
+                   marking->count -= 16;
+                   c->count = 16;
+                   memcpy( c->stack, marking->stack + marking->count, 16*sizeof(hx::Object *));
+                   sGlobalChunks.pushJob(c,false);
+                }
+                #endif
+             }
              else
                 break;
           }
@@ -4890,13 +5041,19 @@ public:
 
    void CountAsync(BlockDataStats &outStats)
    {
+      // Blocks are claimed in batches: one atomic add per block on the
+      //  shared cursor costs more than counting the block when several
+      //  threads contend for its cache line
+      enum { BATCH = 16 };
+      int n = mAllBlocks.size();
       while(!sgThreadPoolAbort)
       {
-         int blockId = _hx_atomic_add(&mThreadJobId, 1);
-         if (blockId>=mAllBlocks.size())
+         int first = _hx_atomic_add(&mThreadJobId, BATCH);
+         if (first>=n)
             break;
-
-         mAllBlocks[blockId]->countRows(outStats);
+         int last = std::min(first+BATCH, n);
+         for(int b=first;b<last;b++)
+            mAllBlocks[b]->countRows(outStats);
       }
    }
 
@@ -5188,6 +5345,20 @@ public:
    }
 
 
+   // Waits for the jobs started with StartThreadJobs(..., inWait=false) by
+   //  the calling thread, after it has done its own share of the work
+   void JoinThreadJobs()
+   {
+      std::lock_guard<std::mutex> l(sThreadPoolLock);
+      sThreadJobDoneSleeping = true;
+      sThreadJobDone->wait(sThreadPoolLock, []() { return sRunningThreads == false; });
+      sThreadJobDoneSleeping = false;
+
+      sAllThreads = 0;
+      sgThreadPoolJob = tpjNone;
+      sLazyThreads = 0;
+   }
+
    void StartThreadJobs(ThreadPoolJob inJob, int inWorkers, bool inWait, int inThreadLimit = -1)
    {
       mThreadJobId = 0;
@@ -5261,8 +5432,21 @@ public:
    double tMarkLocal;
    double tMarkLocalEnd;
    double tMarked;
+   #ifdef HXCPP_GC_CONCURRENT
+   // Phase stamps of the last MarkAll, for the verbose minor pause breakdown
+   double mPhaseMarkStart;
+   double mPhaseStatics0;
+   double mPhaseStatics1;
+   double mPhaseStacks0;
+   double mPhaseStacks1;
+   double mPhaseMarked;
+   #endif
    void MarkAll(bool inGenerational)
    {
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseMarkStart = __hxcpp_time_stamp();
+      #endif
       if (!inGenerational)
       {
          hx::gPrevByteMarkID = hx::gByteMarkID;
@@ -5314,7 +5498,17 @@ public:
 
       mMarker.init();
 
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseStatics0 = __hxcpp_time_stamp();
+      #endif
+
       hx::MarkClassStatics(&mMarker);
+
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseStatics1 = __hxcpp_time_stamp();
+      #endif
 
       {
       hx::AutoMarkPush info(&mMarker,"Roots","root");
@@ -5356,6 +5550,11 @@ public:
 
       mMarker.isGenerational = inGenerational;
 
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseStacks0 = __hxcpp_time_stamp();
+      #endif
+
       // Mark local stacks
       SortLargeList();
       for(int i=0;i<mLocalAllocs.size();i++)
@@ -5369,11 +5568,21 @@ public:
 
       MEM_STAMP(tMarkLocalEnd);
 
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseStacks1 = __hxcpp_time_stamp();
+      #endif
+
       #ifdef HX_MULTI_THREAD_MARKING
          mMarker.releaseJobs();
 
-         // Unleash the workers...
-         StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
+         // Unleash the workers, and mark with them while they wake up
+         StartThreadJobs(tpjMark, MAX_GC_THREADS, false);
+         mMarker.processMarkStackHelper();
+         JoinThreadJobs();
+         // Chunks queued after the helper saw an empty queue and no worker
+         //  was left to take them: finish them here (the pool is idle now)
+         mMarker.processMarkStackHelper();
       #else
          mMarker.processMarkStack();
       #endif
@@ -5381,6 +5590,11 @@ public:
 
 
       MEM_STAMP(tMarked);
+
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerbose)
+         mPhaseMarked = __hxcpp_time_stamp();
+      #endif
 
       hx::FindZombies(mMarker);
 
@@ -5422,6 +5636,20 @@ public:
             DebuggerTrap();
          }
       }
+   }
+   #endif
+
+   #ifdef HXCPP_GC_CONCURRENT
+   void RecordNurseryStart()
+   {
+      size_t lines = (size_t)mAllBlocks.size()*IMMIX_USEFUL_LINES;
+      size_t freeBytes = lines>mRowsInUse ? (lines-mRowsInUse)<<IMMIX_LINE_BITS : 0;
+      size_t working = GetWorkingMemory();
+      // GetFreeBlock grows the heap while below both limits
+      size_t limit = std::min((size_t)sgConcurrentGrowthCap, (size_t)sWorkingMemorySize);
+      size_t growth = limit>working ? limit-working : 0;
+      sgNurseryCapacity = freeBytes + growth;
+      sgNurseryVolumeStart = sgAllocationVolume;
    }
    #endif
 
@@ -5616,6 +5844,10 @@ public:
       }
       #endif
 
+      #ifdef HXCPP_GC_CONCURRENT
+      double concurrentTRemembered0 = __hxcpp_time_stamp();
+      #endif
+
       size_t freeFraggedRows = 0; 
       if (inFreeIsFragged)
       {
@@ -5644,6 +5876,7 @@ public:
 
       hx::QuickVec<hx::Object *> rememberedSet;
       #ifdef HXCPP_GC_CONCURRENT
+      int concurrentRememberedCount = 0;
       // Majors run concurrently: do a minor collect now, and (maybe) kick off
       //  a concurrent mark cycle at the end of this pause.  Only an explicit
       //  compact still uses the classic full stop-the-world path.
@@ -5655,6 +5888,9 @@ public:
       if (sGcMode==gcmGenerational)
       {
          hx::sGlobalChunks.copyPointers(rememberedSet,!generational);
+         #ifdef HXCPP_GC_CONCURRENT
+         concurrentRememberedCount = rememberedSet.size();
+         #endif
          #ifdef SHOW_MEM_EVENTS
          GCLOG("Patch remembered set marks %d\n", rememberedSet.size());
          #endif
@@ -5701,6 +5937,7 @@ public:
       //  concurrent cycles - the only classic full collect left is compaction
       bool full = inForceCompact;
       double concurrentTMark1 = __hxcpp_time_stamp();
+      double concurrentTCount = concurrentTMark1;
       #else
       bool full = inMajor || (sgTimeToNextTableUpdate<=0) || inForceCompact;
       #endif
@@ -5716,6 +5953,9 @@ public:
       if (!full && generational)
       {
          countRows(stats);
+         #ifdef HXCPP_GC_CONCURRENT
+         concurrentTCount = __hxcpp_time_stamp();
+         #endif
          size_t currentRows = stats.rowsInUse + stats.fraggedRows + freeFraggedRows;
          double filled = (double)(currentRows) / (double)(mAllBlocks.size()*IMMIX_USEFUL_LINES);
          if (filled>0.85)
@@ -5865,6 +6105,9 @@ public:
 
       int l1 = mLargeList.size();
 
+      #ifdef HXCPP_GC_CONCURRENT
+      double concurrentTLarge = __hxcpp_time_stamp();
+      #endif
 
       STAMP(t4)
 
@@ -6046,9 +6289,14 @@ public:
 
       #endif
 
+      #ifdef HXCPP_GC_CONCURRENT
+      double concurrentTFree0 = __hxcpp_time_stamp();
+      #endif
+
       createFreeList();
 
       #ifdef HXCPP_GC_CONCURRENT
+      double concurrentTFree1 = __hxcpp_time_stamp();
       bool concurrentStartCycle = concurrentWantCycle && !sgConcurrentCycleActive &&
                                 sgInternalEnable && !inForceCompact;
       if (!concurrentStartCycle)
@@ -6129,6 +6377,7 @@ public:
 
       #ifdef HXCPP_GC_CONCURRENT
       sgConcurrentGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgConcurrentNurseryBudget;
+      RecordNurseryStart();
 
       double concurrentTPrep1 = __hxcpp_time_stamp();
       if (concurrentStartCycle)
@@ -6168,6 +6417,22 @@ public:
                (concurrentTPrep1-concurrentTMark1)*1000.0,
                concurrentTCycleStart*1000.0,
                concurrentStartCycle ? " (cycle started)" : "");
+      if (sgConcurrentVerbose && generational)
+         GCLOG("Concurrent GC: minor phases wait=%.3f remembered=%.3f(%d) markInit=%.3f statics=%.3f roots=%.3f stacks=%.3f mark=%.3f finalizers=%.3f countRows=%.3f large=%.3f other=%.3f freeList=%.3f zeroStart=%.3f blocks=%d free=%d\n",
+               (concurrentTRemembered0-concurrentT0)*1000.0,
+               (concurrentTMark0-concurrentTRemembered0)*1000.0, concurrentRememberedCount,
+               (mPhaseStatics0-mPhaseMarkStart)*1000.0,
+               (mPhaseStatics1-mPhaseStatics0)*1000.0,
+               (mPhaseStacks0-mPhaseStatics1)*1000.0,
+               (mPhaseStacks1-mPhaseStacks0)*1000.0,
+               (mPhaseMarked-mPhaseStacks1)*1000.0,
+               (concurrentTMark1-mPhaseMarked)*1000.0,
+               (concurrentTCount-concurrentTMark1)*1000.0,
+               (concurrentTLarge-concurrentTCount)*1000.0,
+               (concurrentTFree0-concurrentTLarge)*1000.0,
+               (concurrentTFree1-concurrentTFree0)*1000.0,
+               (concurrentTPrep1-concurrentTFree1)*1000.0,
+               (int)mAllBlocks.size(), (int)mFreeBlocks.size());
       #endif
 
       sgIsCollecting = false;
@@ -6712,6 +6977,7 @@ public:
       mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
 
       sgConcurrentGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgConcurrentNurseryBudget;
+      RecordNurseryStart();
 
       HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
       HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
@@ -6901,9 +7167,14 @@ public:
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
             sThreadBlockDataStats[i].clear();
-         StartThreadJobs(tpjCountRows, mAllBlocks.size(), true);
-         outStats = sThreadBlockDataStats[0];
-         for(int i=1;i<MAX_GC_THREADS;i++)
+         // Count blocks here too while the workers wake up
+         BlockDataStats ownStats;
+         ownStats.clear();
+         StartThreadJobs(tpjCountRows, mAllBlocks.size(), false);
+         CountAsync(ownStats);
+         JoinThreadJobs();
+         outStats = ownStats;
+         for(int i=0;i<MAX_GC_THREADS;i++)
             outStats.add(sThreadBlockDataStats[i]);
       }
       else
@@ -6916,11 +7187,22 @@ public:
 
 
    // buils mFreeBlocks and maybe starts the async-zero process on mZeroList
+   //
+   // The list is ordered by mMaxHoleSize (smallest first) with a counting
+   //  sort: hole sizes are whole lines, so the line count is an exact key,
+   //  and this avoids an O(n log n) std::sort of thousands of blocks (each
+   //  comparison two cache misses) in every minor pause. Equal keys keep the
+   //  block order.
    void createFreeList(bool inSkipActiveOwned=false)
    {
-      mFreeBlocks.clear();
+      enum { KEYS = IMMIX_LINES + 1 };
+      int counts[KEYS];
+      memset(counts, 0, sizeof(counts));
 
-      for(int i=0;i<mAllBlocks.size();i++)
+      mFreeBlocksUnsorted.clear();
+      int n = mAllBlocks.size();
+      mFreeBlocksUnsorted.safeReserveExtra(n);
+      for(int i=0;i<n;i++)
       {
          BlockDataInfo *info = mAllBlocks[i];
          #ifdef HXCPP_GC_CONCURRENT
@@ -6932,29 +7214,44 @@ public:
          if (info->GetFreeRows() > 0 && info->mMaxHoleSize>256)
          {
             info->mOwned = false;
-            mFreeBlocks.push(info);
+            int key = info->mMaxHoleSize >> IMMIX_LINE_BITS;
+            if (key>=KEYS)
+               key = KEYS-1;
+            counts[key]++;
+            mFreeBlocksUnsorted.push(info);
          }
       }
 
+      int total = mFreeBlocksUnsorted.size();
       int extra = std::max( mAllBlocks.size(), 8<<IMMIX_BLOCK_GROUP_BITS);
-      mFreeBlocks.safeReserveExtra(extra);
+      mFreeBlocks.clear();
+      mFreeBlocks.safeReserveExtra(total + extra);
+      mFreeBlocks.setSize(total);
 
-      std::sort(&mFreeBlocks[0], &mFreeBlocks[0] + mFreeBlocks.size(), SmallestFreeFirst );
-
-      for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
-         mNextFreeBlockOfSize[i] = mFreeBlocks.size();
-
-      for(int i=mFreeBlocks.size()-1;i>=0;i--)
+      // counts -> first index of each key
+      int pos = 0;
+      for(int k=0;k<KEYS;k++)
       {
-         int slot = mFreeBlocks[i]->mMaxHoleSize >> IMMIX_LINE_BITS;
-         if (slot>=BLOCK_OFSIZE_COUNT)
-            slot = BLOCK_OFSIZE_COUNT-1;
-         mNextFreeBlockOfSize[slot] = i;
+         int c = counts[k];
+         counts[k] = pos;
+         pos += c;
       }
 
-      for(int i=BLOCK_OFSIZE_COUNT-2;i>=0;i--)
-         if (mNextFreeBlockOfSize[i]>mNextFreeBlockOfSize[i+1])
-            mNextFreeBlockOfSize[i] = mNextFreeBlockOfSize[i+1];
+      // The first block that can hold a size slot is the first one whose key
+      //  is at least the slot: where that key's run starts. This is what
+      //  the per-slot scan and its downward propagation compute in the
+      //  sorted path.
+      for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
+         mNextFreeBlockOfSize[i] = counts[i];
+
+      for(int i=0;i<total;i++)
+      {
+         BlockDataInfo *info = mFreeBlocksUnsorted[i];
+         int key = info->mMaxHoleSize >> IMMIX_LINE_BITS;
+         if (key>=KEYS)
+            key = KEYS-1;
+         mFreeBlocks[counts[key]++] = info;
+      }
 
       mZeroList.clear();
    }
@@ -7099,6 +7396,8 @@ public:
 
    BlockList mAllBlocks;
    BlockList mFreeBlocks;
+   // createFreeList scratch: the candidate blocks before the bucket sort
+   BlockList mFreeBlocksUnsorted;
    BlockList mZeroList;
    #ifdef HXCPP_GC_CONCURRENT
    // Snapshot of blocks pending concurrent sweep preparation
@@ -7168,6 +7467,80 @@ MarkChunk *MarkChunk::swapForNew()
 
 
 
+#if defined(HXCPP_GC_NURSERY) && !defined(HX_WATCH)
+// Conservative stack values that may point into the nursery: sorted, and
+//  resolved one block at a time, so each nursery hole is walked once
+//  (GetEnclosingNurseryTypes) instead of once per value
+static void MarkNurseryCandidates(hx::QuickVec<void *> &ioPtrs, hx::MarkContext *__inCtx)
+{
+   void **ptrs = &ioPtrs[0];
+   int n = ioPtrs.size();
+   std::sort(ptrs, ptrs+n);
+
+   enum { BATCH = 256 };
+   int offsets[BATCH];
+   void *values[BATCH];
+   AllocType types[BATCH];
+
+   int i = 0;
+   while(i<n)
+   {
+      BlockData *block = (BlockData *)( ((size_t)ptrs[i]) & IMMIX_BLOCK_BASE_MASK);
+      BlockDataInfo *info = (*gBlockInfo)[block->mId];
+      int count = 0;
+      while(i<n && count<BATCH && (BlockData *)( ((size_t)ptrs[i]) & IMMIX_BLOCK_BASE_MASK)==block)
+      {
+         if (!count || ptrs[i]!=values[count-1])
+         {
+            values[count] = ptrs[i];
+            offsets[count] = (int)(((size_t)ptrs[i]) & IMMIX_BLOCK_OFFSET_MASK) - (int)sizeof(int);
+            count++;
+         }
+         i++;
+      }
+
+      info->GetEnclosingNurseryTypes(offsets, count, types);
+
+      #ifdef HXCPP_GC_CONCURRENT
+      if (sgConcurrentVerify)
+      {
+         // Check against the one-pointer walk
+         for(int j=0;j<count;j++)
+         {
+            void *unused = 0;
+            AllocType expected = info->GetEnclosingNurseryType(offsets[j], &unused);
+            if (expected!=types[j])
+            {
+               if (!sgConcurrentVerifyFile) sgConcurrentVerifyFile = fopen("/tmp/cppia_gcmiss.log", "w");
+               if (sgConcurrentVerifyFile && sgConcurrentVerifyCount<800)
+               {
+                  fprintf(sgConcurrentVerifyFile, "#%d NURSERY-TYPE %p got=%d expected=%d\n",
+                      sgConcurrentVerifyCount++, values[j], (int)types[j], (int)expected);
+                  fflush(sgConcurrentVerifyFile);
+               }
+            }
+         }
+      }
+      #endif
+
+      for(int j=0;j<count;j++)
+      {
+         if (types[j]==allocObject)
+         {
+            hx::MarkObjectAlloc( ((hx::Object *)values[j]), __inCtx );
+            info->pin();
+         }
+         else if (types[j]==allocString)
+         {
+            void *vptr = values[j];
+            HX_MARK_STRING(vptr);
+            info->pin();
+         }
+      }
+   }
+}
+#endif
+
 void MarkConservative(int *inBottom, int *inTop,hx::MarkContext *__inCtx)
 {
    #ifdef VERIFY_STACK_READ
@@ -7209,6 +7582,9 @@ void MarkConservative(int *inBottom, int *inTop,hx::MarkContext *__inCtx)
    #endif
 
 
+   #if defined(HXCPP_GC_NURSERY) && !defined(HX_WATCH)
+   hx::QuickVec<void *> nurseryCandidates;
+   #endif
    for(int *ptr = inBottom ; ptr<inTop; ptr++)
    {
       void *vptr = *(void **)ptr;
@@ -7252,6 +7628,14 @@ void MarkConservative(int *inBottom, int *inTop,hx::MarkContext *__inCtx)
                BlockDataInfo *info = (*gBlockInfo)[block->mId];
 
                int pos = (int)(((size_t)vptr) & IMMIX_BLOCK_OFFSET_MASK);
+               #if defined(HXCPP_GC_NURSERY) && !defined(HX_WATCH)
+               // Nursery candidates are resolved together after the scan
+               if (!sgCheckInternalOffset && info->IsNurseryCandidate(pos-sizeof(int)))
+               {
+                  nurseryCandidates.push(vptr);
+                  continue;
+               }
+               #endif
                AllocType t = sgCheckInternalOffset ?
                      info->GetEnclosingAllocType(pos-sizeof(int),&vptr, allowPrevious):
                      info->GetAllocType(pos-sizeof(int), allowPrevious);
@@ -7320,6 +7704,12 @@ void MarkConservative(int *inBottom, int *inTop,hx::MarkContext *__inCtx)
          // sGlobalAlloc->GetMemType(vptr) , memUnmanaged );
       }
    }
+
+   #if defined(HXCPP_GC_NURSERY) && !defined(HX_WATCH)
+   if (nurseryCandidates.size())
+      MarkNurseryCandidates(nurseryCandidates, __inCtx);
+   #endif
+
    #ifdef SHOW_MEM_EVENTS
    GCLOG("...]\n");
    #endif
@@ -8642,6 +9032,10 @@ double __hxcpp_gc_mem_info(int inWhich)
       case 116: return sgFullTotalMs;
       #endif
       case 117: return (double)sgAllocationVolume;
+      #ifdef HXCPP_GC_CONCURRENT
+      case 118: return (double)(sgAllocationVolume - sgNurseryVolumeStart);
+      case 119: return (double)sgNurseryCapacity;
+      #endif
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:
