@@ -96,7 +96,13 @@ this mostly trades memory for throughput.
 * `Gc.memInfo64()` extensions: `100` = completed cycles, `101` = last remark
   pause (ms), `102` = max remark pause (ms), `103` = last full cycle length
   (ms), `104` = cycle currently active, `105` = last publish pause (ms),
-  `106` = max publish pause (ms).
+  `106` = max publish pause (ms). Mutator pauses (`Collect`): `107` = minor
+  collections, `108` = last minor pause (ms), `109` = max minor pause (ms),
+  `110` = total minor pause time (ms), `111` to `114` = total minor time spent
+  stopping the world, marking, preparing the sweep and starting a cycle (ms),
+  `115` = full collections, `116` = their total pause time (ms), `117` =
+  allocation volume in bytes (holes handed to the allocators plus large
+  allocations), for allocation rates.
 
 ## Environment knobs
 

@@ -707,6 +707,24 @@ static double sgConcurrentMaxRemarkMs = 0;
 static double sgConcurrentLastCycleMs = 0;
 static double sgConcurrentLastPublishMs = 0;
 static double sgConcurrentMaxPublishMs = 0;
+// Stop-the-world pause statistics of the collections run by a mutator
+// thread (Collect): minor (generational) and full. Read through
+// __hxcpp_gc_mem_info 107..116.
+static double sgMinorPauseCount = 0;
+static double sgMinorLastMs = 0;
+static double sgMinorMaxMs = 0;
+static double sgMinorTotalMs = 0;
+static double sgMinorStopMs = 0;
+static double sgMinorMarkMs = 0;
+static double sgMinorSweepPrepMs = 0;
+static double sgMinorCycleStartMs = 0;
+static double sgFullPauseCount = 0;
+static double sgFullTotalMs = 0;
+// Allocation volume: the bytes of every hole handed to a local allocator
+// (the whole hole counts, even when a collection happens before it is full)
+// plus the large allocations. A cheap allocation-rate measure for benchmarks
+// (memInfo 117); the inline bump allocation path is not touched.
+static volatile size_t sgAllocationVolume = 0;
 static double sgConcurrentTriggerRatio = 0.7;
 
 // Work distribution for tpjClearRemembered: a snapshot of the remembered-set
@@ -3688,6 +3706,7 @@ public:
    {
       if (hx::gPauseForCollect)
          __hxcpp_gc_safe_point();
+      sgAllocationVolume += inSize;
 
       //Should we force a collect ? - the 'large' data are not considered when allocating objects
       // from the blocks, and can 'pile up' between smalll object allocations
@@ -6118,6 +6137,27 @@ public:
       }
       double concurrentTCycleStart = __hxcpp_time_stamp() - concurrentTPrep1;
 
+      {
+         double pauseMs = (__hxcpp_time_stamp()-concurrentT0)*1000.0;
+         if (generational)
+         {
+            sgMinorPauseCount += 1;
+            sgMinorLastMs = pauseMs;
+            if (pauseMs>sgMinorMaxMs)
+               sgMinorMaxMs = pauseMs;
+            sgMinorTotalMs += pauseMs;
+            sgMinorStopMs += (concurrentTMark0-concurrentT0)*1000.0;
+            sgMinorMarkMs += (concurrentTMark1-concurrentTMark0)*1000.0;
+            sgMinorSweepPrepMs += (concurrentTPrep1-concurrentTMark1)*1000.0;
+            sgMinorCycleStartMs += concurrentTCycleStart*1000.0;
+         }
+         else
+         {
+            sgFullPauseCount += 1;
+            sgFullTotalMs += pauseMs;
+         }
+      }
+
       if (sgConcurrentVerbose)
          GCLOG("Concurrent GC: %s pause %.3fms (stop=%.3f mark=%.3f sweepPrep=%.3f cycleStart=%.3f)%s\n",
                generational ? "minor" : "full",
@@ -7852,6 +7892,7 @@ public:
             #ifdef HXCPP_GC_NURSERY
             spaceFirst = allocBase + mCurrentRange[mCurrentHole].start + sizeof(int);
             spaceOversize = spaceFirst + mCurrentRange[mCurrentHole].length;
+            sgAllocationVolume += mCurrentRange[mCurrentHole].length;
             #else
             spaceStart = mCurrentRange[mCurrentHole].start;
             spaceEnd = spaceStart + mCurrentRange[mCurrentHole].length;
@@ -7881,6 +7922,7 @@ public:
             #ifdef HXCPP_GC_NURSERY
             spaceFirst = allocBase + mCurrentRange->start + sizeof(int);
             spaceOversize = spaceFirst + mCurrentRange->length;
+            sgAllocationVolume += mCurrentRange->length;
             #else
             spaceStart = mCurrentRange->start;
             spaceEnd = spaceStart + mCurrentRange->length;
@@ -8587,6 +8629,17 @@ double __hxcpp_gc_mem_info(int inWhich)
       case 104: return sgConcurrentCycleActive ? 1.0 : 0.0;
       case 105: return sgConcurrentLastPublishMs;
       case 106: return sgConcurrentMaxPublishMs;
+      case 107: return sgMinorPauseCount;
+      case 108: return sgMinorLastMs;
+      case 109: return sgMinorMaxMs;
+      case 110: return sgMinorTotalMs;
+      case 111: return sgMinorStopMs;
+      case 112: return sgMinorMarkMs;
+      case 113: return sgMinorSweepPrepMs;
+      case 114: return sgMinorCycleStartMs;
+      case 115: return sgFullPauseCount;
+      case 116: return sgFullTotalMs;
+      case 117: return (double)sgAllocationVolume;
       #endif
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
