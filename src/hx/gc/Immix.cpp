@@ -621,6 +621,9 @@ static volatile size_t sgAllocationVolume = 0;
 // happens about when the volume allocated since then reaches that room.
 static size_t sgNurseryVolumeStart = 0;
 static size_t sgNurseryCapacity = 0;
+// Bytes of the objects in blocks found live by the last collection that
+// counted them exactly (a full collection), for leak checks (memInfo 120)
+static size_t sgLastFullLiveBytes = 0;
 
 #ifdef HXCPP_GC_CONCURRENT
 
@@ -6036,6 +6039,8 @@ public:
 
       size_t oldRowsInUse = mRowsInUse;
       mRowsInUse = stats.rowsInUse + stats.fraggedRows + freeFraggedRows;
+      if (full)
+         sgLastFullLiveBytes = stats.bytesInUse;
 
       bool moved = false;
 
@@ -9036,6 +9041,7 @@ double __hxcpp_gc_mem_info(int inWhich)
       case 118: return (double)(sgAllocationVolume - sgNurseryVolumeStart);
       case 119: return (double)sgNurseryCapacity;
       #endif
+      case 120: return (double)sgLastFullLiveBytes;
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:

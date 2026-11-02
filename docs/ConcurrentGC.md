@@ -153,7 +153,10 @@ synchronous), so a scheduler must expect that wait.
   allocations), for allocation rates. Nursery fill: `118` = bytes handed to
   the allocators since the last collection that rebuilt the free lists,
   `119` = room for new objects at that collection (a minor comes when `118`
-  reaches `119`).
+  reaches `119`). `120` = bytes of the objects found live in blocks by the
+  last full collection (counted exactly, without the line fragmentation that
+  `MEM_INFO_USAGE` includes; add `MEM_INFO_LARGE` for the large objects): with
+  `Gc.run(true)` first, the live size for leak checks.
 
 ## Environment knobs
 
@@ -256,6 +259,72 @@ free blocks are used up, so the budget does not bind there.
 AllocRate 107 → 105 ms. GcBench (Ceramic, churn mode, 3 alternating hidden
 runs): work p50 1.06 to 1.11 ms and p99 2.25 to 2.52 ms in both, no dropped
 frame difference.
+
+### Heap growth during concurrent cycles (2026-11-02, M4 Max, load 7 to 40: other builds running)
+
+Measured with the soak mode of the GPUI port bench (`GPUI_BENCH_SOAK_SECONDS`
+in `ceramic-gpui/test/bench`: memory sampled every 5 s for 30 minutes, the
+live size after `Gc.run(true)` every minute), default Ceramic build:
+
+| Scenario (30 min) | live (memInfo 120 + large) | reserved after 3 min | after 30 min | process RSS |
+|---|---|---|---|---|
+| cards full | 17.9 to 18.1 MB | 549 MB | 1264 MB (+26 MB/min) | 1.44 GB |
+| gallery-input-scroll cached | 51 to 74 MB (used lines) | 409 MB | 823 MB (+14 MB/min) | 0.98 GB |
+
+The live size is flat (no leak in the program), but the heap never stops
+growing. What grows it (counted per growth site, cards full, 30 s):
+
+* A cycle almost always starts by the quick-start, inside a collect that was
+  requested because the free list is empty. Every object allocated during
+  the cycle (allocate-black) then goes to new blocks: `allowMoreBlocks` lets
+  the heap grow without limit while a cycle is active, so that mutators never
+  wait for the marker. Those blocks are free again after the publish, but the
+  next quick-start again comes with an empty free list. About 2/3 of the
+  growth is in this path, most of the rest is the "prefer growing" path right
+  after the quick-start (the same thing). The GPUI bench allocates about
+  1.5 GB/s on cards full: a few MB per cycle.
+* A heap that grew lowers the occupancy ratio, so cycles come less often,
+  but each one still adds blocks: the heap grows like the square root of
+  time, with no bound. `HXCPP_GC_CONCURRENT_NURSERY_MB` does not bind (it
+  only limits growth outside cycles), and nothing shrinks the heap (without
+  `HXCPP_GC_MOVING` even `Gc.run(true)` keeps every block group).
+* While a pause is requested (remark, publish), an allocating thread that
+  claims a block sees the request, drops the block's holes, and claims
+  another block at its next allocation, until the free list is empty: it
+  only stops in `GetFreeBlock` once `GetNextFree` fails. Seen as about 2700
+  blocks claimed for 7 MB of allocation during one cycle, and remark stops
+  of 1.5 to 3.6 ms waiting for that thread.
+
+Tried, each measured alone against the same generated C++ (patch and test
+kept in `ceramic-gpui/scratchpad/gcgrow/`):
+
+1. Pause before claiming a block (check `gPauseForCollect` at the top of
+   `GetFreeBlock`). Short bench (300 frames, 5 alternating runs): reserved
+   3 to 6 % lower, frame median -2 to +4 %, max minor pause higher on some
+   runs; over 30 s the heap grows like before. Not kept.
+2. Early cycle start: when a cycle is due, start it while the free list
+   still holds about twice what the last cycles used (counted in claimed
+   free lines), so the cycle allocates into it. Without 1 the reserve is
+   eaten by the block burning above; with 1 the heap stops growing: cards
+   full 70 to 150 MB flat instead of 600 MB after 5 minutes. But the heap
+   then stays close to the live size, minors and cycles come 2 to 15 times
+   more often, and the frames are slower: GPUI short bench median +3 to +11 %,
+   GameBench p50 0.21-0.23 to 0.26-0.27 ms (reserved 195 to 146 MB, cycles
+   11 to 29). Not kept.
+3. 1 and 2 plus a heap target between cycles of K times the memory in use
+   after the last cycle. K = 2.5: cards full flat at 152 MB after 5 minutes
+   (unchanged collector: 607 to 618 MB), gallery-input-scroll 245 MB (unchanged: 470 MB), but cards
+   full frame median +2 to +10 % (5.1 cycles/s against 0.3); K = 3 and 4:
+   cards 239 and 282 MB, median +13 and +20 %. gallery-input-scroll equal or
+   faster. Not kept: memory drops clearly, but not without slowing frames.
+   A larger nursery budget (64, 128 MB), a larger free space target
+   (`HXCPP_TARGET_FREE_SPACE` 200, 400) or a later trigger (0.85) did not
+   change that trade.
+
+The cost seems to come from the cycles themselves (barriers armed and
+allocate-black for a larger share of the frames), which a bounded heap makes
+more frequent. The numbers were taken under heavy load (7 to 40); a quiet
+machine A/B of option 3 is worth doing before deciding on it.
 
 ## Files
 
