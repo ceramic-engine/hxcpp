@@ -48,7 +48,8 @@ barrier *implementations* (macros in `hx/GC.h`) switch behaviour at runtime.
      allocation being scanned, so racing a resize can never read out of
      bounds; any element such a torn scan could miss is covered by a barrier.
    * The heap may grow during a cycle rather than ever making a mutator wait
-     for the marker (the cycle is asked to *accelerate* instead).
+     for the marker (the cycle is asked to *accelerate* instead), up to the
+     heap goal (see "Heap bound" below).
 
 3. **Remark (stop-the-world, ~0.2-0.4 ms)** — roots and stacks are
    re-scanned, per-thread chunks flushed, dirty objects re-scanned, the
@@ -156,7 +157,10 @@ synchronous), so a scheduler must expect that wait.
   reaches `119`). `120` = bytes of the objects found live in blocks by the
   last full collection (counted exactly, without the line fragmentation that
   `MEM_INFO_USAGE` includes; add `MEM_INFO_LARGE` for the large objects): with
-  `Gc.run(true)` first, the live size for leak checks.
+  `Gc.run(true)` first, the live size for leak checks. Heap bound: `121` =
+  heap goal in bytes (0 before the first cycle or when unbounded), `122` =
+  allocations that waited for a cycle at the goal, `123` = bytes of empty
+  block groups given back.
 
 ## Environment knobs
 
@@ -166,7 +170,41 @@ synchronous), so a scheduler must expect that wait.
 | `HXCPP_GC_CONCURRENT_TRIGGER` | 0.7 | projected-occupancy ratio that starts a cycle |
 | `HXCPP_GC_CONCURRENT_NURSERY_MB` | 32 | heap growth allowed between minor collects |
 | `HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS` | 4 | remark drain budget before resuming + retrying |
+| `HXCPP_GC_CONCURRENT_HEAP_FACTOR` | 2 | heap goal = factor x memory in use after a cycle + margin; 0: unbounded (the old behaviour) |
+| `HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB` | 256 | fixed part of the heap goal |
+| `HXCPP_GC_CONCURRENT_HEAP_RELEASE` | 1 | give back empty block groups when the heap is above 1.5 x the goal |
 | `HXCPP_GC_CONCURRENT_VERBOSE` | off | log cycle/pause timings and the minor pause phases to stdout |
+
+The mark threads, trigger, nursery, remark budget, heap factor and heap
+margin can also be compile defines with a value
+(`-D HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB=128`; a Ceramic project lists them
+under `defines` in `ceramic.yml`); the environment variable wins.
+
+## Heap bound
+
+Without a bound the heap grew for as long as the program ran (GPUI port
+bench: 1.26 GB reserved for 18 MB live after 30 minutes, still growing, see
+the measurements below). Every cycle that starts by the quick-start begins
+with an empty free list, so everything allocated during the cycle goes to new
+blocks, and nothing ever gave blocks back. Now:
+
+* **Heap goal.** After each cycle, `goal = HEAP_FACTOR x live + HEAP_MARGIN`
+  (live: used lines plus large objects after the cycle). Below the goal
+  nothing changes: cycles start as before (occupancy trigger, quick-start)
+  and the heap grows during cycles as before. The block heap never grows
+  past the goal, except by a slack of a quarter of the goal while a cycle
+  runs; at that limit the allocating thread waits for the running cycle (it
+  is asked to accelerate) instead of growing (counted in memInfo `122`).
+* **Early start near the goal.** When the heap is within the reserve of the
+  goal and a cycle is due, the cycle starts from `GetFreeBlock` while the
+  free list still holds what the recent cycles used (twice the free lines
+  they claimed, a slowly decaying maximum), not on an empty free list, so the
+  wait above stays rare (0 in every measured run).
+* **Release.** At a publish, when the block heap is above 1.5 x the goal
+  (after a burst, or when the live size went down), the block groups whose
+  32 blocks are all empty and unowned are freed, down to 1.25 x the goal.
+  The heap does not move objects: a group that still holds a few live
+  objects stays.
 
 ## Tracy
 
@@ -295,36 +333,50 @@ growing. What grows it (counted per growth site, cards full, 30 s):
   blocks claimed for 7 MB of allocation during one cycle, and remark stops
   of 1.5 to 3.6 ms waiting for that thread.
 
-Tried, each measured alone against the same generated C++ (patch and test
-kept in `ceramic-gpui/scratchpad/gcgrow/`):
+First attempts (2026-11-02, load 7 to 40) are in the ceramic-gpui plan
+(`docs/perf/HEAP_GROWTH.md`). What was kept is the bound described in "Heap
+bound" above, measured on 2026-11-03 against the collector before it (A),
+same generated C++, alternated A/B runs, load 3 to 5:
 
-1. Pause before claiming a block (check `gPauseForCollect` at the top of
-   `GetFreeBlock`). Short bench (300 frames, 5 alternating runs): reserved
-   3 to 6 % lower, frame median -2 to +4 %, max minor pause higher on some
-   runs; over 30 s the heap grows like before. Not kept.
-2. Early cycle start: when a cycle is due, start it while the free list
-   still holds about twice what the last cycles used (counted in claimed
-   free lines), so the cycle allocates into it. Without 1 the reserve is
-   eaten by the block burning above; with 1 the heap stops growing: cards
-   full 70 to 150 MB flat instead of 600 MB after 5 minutes. But the heap
-   then stays close to the live size, minors and cycles come 2 to 15 times
-   more often, and the frames are slower: GPUI short bench median +3 to +11 %,
-   GameBench p50 0.21-0.23 to 0.26-0.27 ms (reserved 195 to 146 MB, cycles
-   11 to 29). Not kept.
-3. 1 and 2 plus a heap target between cycles of K times the memory in use
-   after the last cycle. K = 2.5: cards full flat at 152 MB after 5 minutes
-   (unchanged collector: 607 to 618 MB), gallery-input-scroll 245 MB (unchanged: 470 MB), but cards
-   full frame median +2 to +10 % (5.1 cycles/s against 0.3); K = 3 and 4:
-   cards 239 and 282 MB, median +13 and +20 %. gallery-input-scroll equal or
-   faster. Not kept: memory drops clearly, but not without slowing frames.
-   A larger nursery budget (64, 128 MB), a larger free space target
-   (`HXCPP_TARGET_FREE_SPACE` 200, 400) or a later trigger (0.85) did not
-   change that trade.
+| | A (unbounded) | heap bound (defaults 2 x live + 256 MB) |
+|---|---|---|
+| cards full, 5 to 10 min soak: reserved (RSS) | 602 to 757 MB (808 to 947 MB), growing | 338 to 361 MB (508 to 536 MB), flat after 3 min |
+| cards full soak: frame median / p99 | 8.99 to 9.04 / 13.73 to 13.90 ms | 9.06 to 9.10 / 13.25 to 13.64 ms |
+| gallery-input-scroll cached, 10 min: reserved (RSS) | 565 MB (722 MB), growing | 392 to 395 MB (581 to 586 MB), flat after 5 min |
+| gallery-input-scroll soak: frame median / p99 | 2.58 / 4.39 ms | 2.55 to 2.58 / 4.34 to 4.38 ms |
+| waits for a cycle at the goal | | 0 |
 
-The cost seems to come from the cycles themselves (barriers armed and
-allocate-black for a larger share of the frames), which a bounded heap makes
-more frequent. The numbers were taken under heavy load (7 to 40); a quiet
-machine A/B of option 3 is worth doing before deciding on it.
+GPUI bench, 300 to 600 frames, 8 pairs (heap still under the goal):
+frame median within -1.1 to +1.4 % on cards, story-dense, gallery-input-scroll,
+scroll-table and editor-type in both modes, main thread CPU per frame the
+same. GcBench (Ceramic sample, hidden, 8 pairs, median of each metric):
+CHURN p50 1.585 / 1.640 ms, p99 2.945 / 3.050, p99.9 4.140 / 4.225, max
+5.175 / 4.700, reserved 125 MB both; GAME p50 0.205 / 0.210, p99 0.485 /
+0.455, p99.9 2.580 / 2.560, max 3.495 / 3.585, reserved 38 / 37 MB (both stay
+far under their goal, so the collector behaves as before). `test/concurrent-gc`
+(6 alternated runs): GameBench, Trees and AllocRate equal within noise.
+`HeapBound` (in `run.sh`, built with a 32 MB margin so the goal binds): the
+unbounded collector grows from 200 to 265 MB in the steady phase and keeps
+646 MB after a 600 MB burst; with the bound it stays under its goal and gives
+back 463 MB after the burst.
+
+Tried and not kept:
+
+* Pausing before claiming a block (cause 3): removes the waste, but the heap
+  then often stays at the 32 MB nursery budget above the live size (cards
+  117 MB): 11 cycles and 22 minors per second, frame median +4 % in a
+  10 minute soak. The run to run behaviour was also bimodal (117 or 361 MB).
+* A pacer that starts cycles at the end of minors and lets the heap grow to
+  the goal between cycles, without the quick-start: good for the GPUI bench
+  (median within 1 %), but GcBench CHURN and GAME then run expensive minors
+  (6 to 17 ms, remembered sets of 18000 to 65000 objects) where the
+  quick-start avoided them, and a 37 ms frame came from the free list
+  capacity, which cannot grow while allocators read it (max +31 ms on CHURN).
+* Bounding with early starts at any heap size (cycles on a small heap):
+  GPUI median +6 to +10 % (40 cycles per second on cards).
+* Draining the emptiest groups (leaving them out of the free list until
+  empty) to release more: the remaining free list could starve, and the
+  heap grew back.
 
 ## Files
 

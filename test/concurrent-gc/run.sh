@@ -20,6 +20,7 @@ haxe -main AllocRate -cp . -cpp bin/alloc-conc    $FUT
 haxe -main GameBench -cp . -cpp bin/bench-gen    $GEN
 haxe -main GameBench -cp . -cpp bin/bench-conc    $FUT
 haxe -main RemarkStorm -cp . -cpp bin/storm-conc  $FUT
+haxe -main HeapBound -cp . -cpp bin/heapbound-conc  $FUT -D HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB=32
 
 echo "== correctness =="
 bin/smoke-gen/Smoke   | tail -1
@@ -27,6 +28,7 @@ bin/smoke-conc/Smoke   | tail -1
 bin/stress-gen/Stress | tail -1
 for i in 1 2 3; do bin/stress-conc/Stress 1200 | tail -1; done
 HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS=0.5 bin/storm-conc/RemarkStorm | tail -1
+bin/heapbound-conc/HeapBound | tail -2
 
 echo "== benchmarks (classic vs concurrent) =="
 echo "-- trees --";      bin/trees-gen/Trees 19 | grep time;  bin/trees-conc/Trees 19 | grep time

@@ -678,6 +678,35 @@ static size_t sgConcurrentNurseryBudget = 32*1024*1024;
 //  is unbounded)
 static double sgConcurrentRemarkBudgetMs = 4.0;
 static volatile size_t sgConcurrentGrowthCap = 0;
+
+// Heap bound. Cycles still start as before (occupancy trigger, quick-start),
+//  but the block heap never grows past a goal: sgHeapGoal = sgHeapFactor *
+//  live + sgHeapMargin, live being the memory in use after the last cycle
+//  (used lines plus large objects). Below the goal nothing changes. At the
+//  goal, a cycle may only exceed it by a slack, then the allocating thread
+//  waits for the cycle (it is asked to hurry) instead of growing the heap;
+//  cycles start early enough (while the free list still holds what the last
+//  cycles allocated) for that wait to stay rare. A heap well above its goal
+//  (after a burst) gives empty block groups back. sgHeapFactor = 0: no bound.
+static double sgHeapFactor = 2.0;
+static size_t sgHeapMargin = 256*1024*1024;
+static size_t sgHeapGoal = 0;
+static size_t sgHeapLive = 0;
+// Early start: the free space a cycle is expected to use before its publish
+//  (twice what the recent cycles used, a slowly decaying maximum)
+static size_t sgCycleReserve = 8*1024*1024;
+static size_t sgCycleStartClaimedLines = 0;
+static bool sgEarlyStartArmed = false;
+// Free lines listed in the free block list, and those claimed since it was built
+static volatile int sgFreeListLines = 0;
+static volatile int sgFreeListClaimedLines = 0;
+// Blocks added while a cycle was active
+static int sgCycleGrownBlocks = 0;
+// Allocations that waited for a cycle at the heap limit (memInfo 122)
+static int sgHeapLimitWaits = 0;
+// Release of empty block groups above the goal (memInfo 123: bytes released)
+static bool sgHeapRelease = true;
+static size_t sgHeapReleasedBytes = 0;
 static bool sgConcurrentVerbose = false;
 // DIAG: mark-completeness verifier. When enabled (env HXCPP_GC_CONCURRENT_VERIFY),
 // the final remark pause runs a second full mark from all roots. In a correct
@@ -866,6 +895,8 @@ struct GroupInfo
 
    bool pinned;
    bool isEmpty;
+   // Heap bound: chosen for release (ReleaseEmptyGroupsAbove)
+   bool release;
    int  usedBytes;
    int  usedSpace;
 
@@ -875,6 +906,7 @@ struct GroupInfo
       usedBytes = 0;
       usedSpace = 0;
       isEmpty = true;
+      release = false;
    }
    int getMoveScore()
    {
@@ -4061,6 +4093,7 @@ public:
                       info->mOwned = true;
                       #ifdef HXCPP_GC_CONCURRENT
                       info->mConcurrentOwnEpoch = sgConcurrentEpoch;
+                      _hx_atomic_add(&sgFreeListClaimedLines, info->GetFreeRows());
                       #endif
 
                       // Increase the mNextFreeBlockOfSize
@@ -4217,6 +4250,11 @@ public:
          mAllBlocks.push(info);
          mFreeBlocks.push(info);
       }
+      #ifdef HXCPP_GC_CONCURRENT
+      _hx_atomic_add(&sgFreeListLines, n*IMMIX_USEFUL_LINES);
+      if (sgConcurrentCycleActive)
+         sgCycleGrownBlocks += n;
+      #endif
       std::stable_sort(&mAllBlocks[0], &mAllBlocks[0] + mAllBlocks.size(), SortByBlockPtr );
       mAllBlocksCount = mAllBlocks.size();
       for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
@@ -4247,6 +4285,8 @@ public:
       // Allow the heap to grow during warmup (like the classic gcmFull start)
       //  and while a concurrent cycle is running, so the mutators are never
       //  forced to wait for the marker
+      if (sgHeapGoal && GetWorkingMemory() >= HeapBlockLimit())
+         return false;
       return sGcMode==gcmFull || sgConcurrentCycleActive || !sgConcurrentHadFirstCollect ||
                GetWorkingMemory() < sgConcurrentGrowthCap;
       #elif defined(HXCPP_GC_GENERATIONAL)
@@ -4262,8 +4302,76 @@ public:
    }
 
 
+   #ifdef HXCPP_GC_CONCURRENT
+   // Heap bound: the size the block heap may reach now (the goal less the
+   //  large objects, plus a slack while a cycle is running)
+   size_t HeapBlockLimit()
+   {
+      size_t goal = sgHeapGoal;
+      size_t large = mLargeAllocated;
+      size_t limit = goal>large ? goal-large : 0;
+      if (sgConcurrentCycleActive)
+         limit += std::max(goal/4, (size_t)16*1024*1024);
+      return limit;
+   }
+
+   // The quick-start test of Collect: old-generation pressure calls for a
+   //  cycle at the next collect
+   bool ConcurrentCycleDue()
+   {
+      if (mAllBlocksCount<=0)
+         return false;
+      double filled = (double)mRowsInUse/(double)(mAllBlocksCount*IMMIX_USEFUL_LINES);
+      double projected = filled + (1.0-filled)*mGenerationalRetainEstimate;
+      return projected >= sgConcurrentTriggerRatio-0.1;
+   }
+
+   // Room left for new objects before the next collect: the unclaimed free
+   //  lines of the free list, plus the growth allowed
+   size_t ConcurrentRoomLeft()
+   {
+      int lines = sgFreeListLines - sgFreeListClaimedLines;
+      size_t room = lines>0 ? ((size_t)lines)<<IMMIX_LINE_BITS : 0;
+      size_t working = GetWorkingMemory();
+      size_t limit = std::min((size_t)sgConcurrentGrowthCap, (size_t)sWorkingMemorySize);
+      if (sgHeapGoal && limit>HeapBlockLimit())
+         limit = HeapBlockLimit();
+      if (limit>working)
+         room += limit-working;
+      return room;
+   }
+   #endif
+
    BlockDataInfo *GetFreeBlock(int inRequiredBytes, hx::ImmixAllocator *inAlloc)
    {
+      #ifdef HXCPP_GC_CONCURRENT
+      // Near the heap goal, start a due cycle while the free list still
+      //  holds what the cycle is expected to allocate: started on an empty
+      //  free list (the quick-start inside a collect), the whole cycle would
+      //  allocate into new blocks, which the goal no longer allows. Below
+      //  the goal the heap grows during cycles as before. Tested once per
+      //  collect.
+      if (sgEarlyStartArmed && sgHeapGoal && !sgConcurrentCycleActive && sgInternalEnable &&
+            !hx::gPauseForCollect && GetWorkingMemory() + sgCycleReserve >= HeapBlockLimit() &&
+            ConcurrentRoomLeft() <= sgCycleReserve)
+      {
+         sgEarlyStartArmed = false;
+         if (ConcurrentCycleDue())
+         {
+            #ifndef HXCPP_SINGLE_THREADED_APP
+            hx::EnterGCFreeZone();
+            gThreadStateChangeLock->lock();
+            hx::ExitGCFreeZoneLocked();
+            #endif
+            if (!sgConcurrentCycleActive)
+               inAlloc->SetupStackAndCollect(false,false,true,false);
+            #ifndef HXCPP_SINGLE_THREADED_APP
+            gThreadStateChangeLock->unlock();
+            #endif
+         }
+      }
+      #endif
+
       while(true)
       {
          BlockDataInfo *result = GetNextFree(inRequiredBytes);
@@ -4296,12 +4404,24 @@ public:
          bool forceCompact = false;
          bool growthOk = !sgInternalEnable || GetWorkingMemory()<sWorkingMemorySize;
          #ifdef HXCPP_GC_CONCURRENT
-         if (!growthOk && sgConcurrentCycleActive)
+         bool atLimit = sgHeapGoal && GetWorkingMemory() >= HeapBlockLimit();
+         if (!growthOk && sgConcurrentCycleActive && !atLimit)
          {
             // Borrow memory rather than stalling this thread until the
             //  concurrent cycle completes - but ask it to hurry up
             sgConcurrentAccelerate = true;
             growthOk = true;
+         }
+         if (atLimit)
+         {
+            // Heap bound: the collect below waits for the running cycle (or
+            //  runs a minor) instead of growing the heap
+            growthOk = false;
+            if (sgConcurrentCycleActive)
+            {
+               sgConcurrentAccelerate = true;
+               sgHeapLimitWaits++;
+            }
          }
          #endif
          if (!result && allowMoreBlocks() && growthOk)
@@ -4321,6 +4441,14 @@ public:
          }
 
          #ifdef HXCPP_GC_CONCURRENT
+         if (!result && sgHeapGoal && sgConcurrentCycleActive && GetWorkingMemory() >= HeapBlockLimit())
+         {
+            // Heap bound: the collect above started a cycle (quick-start)
+            //  on an empty free list; wait for it rather than grow
+            sgHeapLimitWaits++;
+            inAlloc->SetupStackAndCollect(false,false,true,true);
+            result = GetNextFree(inRequiredBytes);
+         }
          if (!result)
          {
             // Prefer growing the heap (the concurrent collector will reclaim
@@ -4795,6 +4923,69 @@ public:
       }
 
       return moveObjs;
+   }
+   #endif
+
+   #ifdef HXCPP_GC_CONCURRENT
+   // Heap bound, in the publish pause (marking and sweep done, the world
+   //  stopped): frees the block groups whose blocks are all empty and not
+   //  owned by an allocator, until the block heap is down to inTarget bytes.
+   //  The free list is rebuilt right after. Returns the blocks released.
+   size_t ReleaseEmptyGroupsAbove(size_t inTarget)
+   {
+      size_t working = GetWorkingMemory();
+      if (working<=inTarget)
+         return 0;
+      for(int i=0;i<gAllocGroups.size();i++)
+         gAllocGroups[i].isEmpty = gAllocGroups[i].alloc!=0;
+      for(int i=0;i<mAllBlocks.size();i++)
+      {
+         BlockDataInfo *info = mAllBlocks[i];
+         if (!info->isEmpty() || info->mOwned || info->mPinned || info->mZeroLock)
+            gAllocGroups[info->mGroupId].isEmpty = false;
+      }
+      bool any = false;
+      for(int i=0;i<gAllocGroups.size();i++)
+         gAllocGroups[i].release = false;
+      // Highest groups first
+      for(int i=gAllocGroups.size()-1;i>=0 && working>inTarget;i--)
+      {
+         GroupInfo &g = gAllocGroups[i];
+         if (g.alloc && g.isEmpty && g.blocks>0)
+         {
+            g.release = true;
+            working -= (size_t)g.blocks<<IMMIX_BLOCK_BITS;
+            any = true;
+         }
+      }
+      if (!any)
+         return 0;
+      size_t released = 0;
+      for(int i=0; i<mAllBlocks.size(); )
+      {
+         GroupInfo &g = gAllocGroups[mAllBlocks[i]->mGroupId];
+         if (g.alloc && g.release)
+         {
+            mAllBlocks[i]->destroy();
+            mAllBlocks.erase(i);
+            released++;
+         }
+         else
+            i++;
+      }
+      for(int i=0;i<gAllocGroups.size();i++)
+      {
+         GroupInfo &g = gAllocGroups[i];
+         if (g.alloc && g.release)
+         {
+            HxFreeGCBlock(g.alloc);
+            g.alloc = 0;
+         }
+         g.release = false;
+      }
+      mAllBlocksCount = mAllBlocks.size();
+      sgHeapReleasedBytes += released<<IMMIX_BLOCK_BITS;
+      return released;
    }
    #endif
 
@@ -5650,9 +5841,12 @@ public:
       size_t working = GetWorkingMemory();
       // GetFreeBlock grows the heap while below both limits
       size_t limit = std::min((size_t)sgConcurrentGrowthCap, (size_t)sWorkingMemorySize);
+      if (sgHeapGoal && limit>HeapBlockLimit())
+         limit = HeapBlockLimit();
       size_t growth = limit>working ? limit-working : 0;
       sgNurseryCapacity = freeBytes + growth;
       sgNurseryVolumeStart = sgAllocationVolume;
+      sgEarlyStartArmed = sgHeapFactor>0 && sgConcurrentHadFirstCollect;
    }
    #endif
 
@@ -6554,6 +6748,8 @@ public:
       // Arm the concurrent write barriers + allocate-black.  The mutators are
       //  all stopped at safe points, so they observe this consistently.
       hx::gConcurrentGcMarkActive = 1;
+      sgCycleStartClaimedLines = (size_t)sgFreeListClaimedLines;
+      sgCycleGrownBlocks = 0;
 
       ConcurrentMarkRoots();
 
@@ -6982,12 +7178,45 @@ public:
       mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
 
       sgConcurrentGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgConcurrentNurseryBudget;
-      RecordNurseryStart();
+
+      size_t releasedBlocks = 0;
+      if (sgHeapFactor>0)
+      {
+         // Early start: what this cycle used of the free list (claimed free
+         //  lines) and of new blocks
+         size_t claimed = (size_t)sgFreeListClaimedLines;
+         size_t used = claimed>sgCycleStartClaimedLines ? (claimed-sgCycleStartClaimedLines)<<IMMIX_LINE_BITS : 0;
+         used += (size_t)sgCycleGrownBlocks<<IMMIX_BLOCK_BITS;
+         size_t reserve = used*2;
+         size_t decayed = sgCycleReserve - sgCycleReserve/16;
+         if (reserve < decayed) reserve = decayed;
+         if (reserve < (size_t)4*1024*1024) reserve = (size_t)4*1024*1024;
+         sgCycleReserve = reserve;
+
+         sgHeapLive = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated;
+         sgHeapGoal = (size_t)(sgHeapFactor*sgHeapLive) + sgHeapMargin;
+
+         // Give back empty block groups when the heap is well above the goal
+         //  (after a burst, or a goal that went down), down to 1.25 times
+         //  the goal. Only whole empty groups go: the heap does not move
+         //  objects. Right after the sweep is when they are empty: the
+         //  mutators have not reused them yet (the margin between 1.25 and
+         //  1.5 times the goal avoids releasing and growing back in turn).
+         size_t blocksGoal = sgHeapGoal>mLargeAllocated ? sgHeapGoal-mLargeAllocated : 0;
+         if (sgHeapRelease && GetWorkingMemory() > blocksGoal + blocksGoal/2)
+            releasedBlocks = ReleaseEmptyGroupsAbove(blocksGoal + blocksGoal/4);
+      }
 
       HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
       HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
 
       createFreeList(true);
+      RecordNurseryStart();
+      if (sgConcurrentVerbose && sgHeapFactor>0)
+         GCLOG("Concurrent GC: heap %.1fMB goal %.1fMB live %.1fMB reserve %.1fMB grown in cycle %.1fMB released %.1fMB waits %d\n",
+               (double)GetWorkingMemory()/(1024.0*1024.0), (double)sgHeapGoal/(1024.0*1024.0), (double)sgHeapLive/(1024.0*1024.0),
+               (double)sgCycleReserve/(1024.0*1024.0), (double)sgCycleGrownBlocks*IMMIX_BLOCK_SIZE/(1024.0*1024.0),
+               (double)releasedBlocks*IMMIX_BLOCK_SIZE/(1024.0*1024.0), sgHeapLimitWaits);
       backgroundProcessFreeList(true);
 
       mAllBlocksCount   = mAllBlocks.size();
@@ -7205,6 +7434,9 @@ public:
       memset(counts, 0, sizeof(counts));
 
       mFreeBlocksUnsorted.clear();
+      #ifdef HXCPP_GC_CONCURRENT
+      int listedLines = 0;
+      #endif
       int n = mAllBlocks.size();
       mFreeBlocksUnsorted.safeReserveExtra(n);
       for(int i=0;i<n;i++)
@@ -7218,6 +7450,9 @@ public:
          #endif
          if (info->GetFreeRows() > 0 && info->mMaxHoleSize>256)
          {
+            #ifdef HXCPP_GC_CONCURRENT
+            listedLines += info->GetFreeRows();
+            #endif
             info->mOwned = false;
             int key = info->mMaxHoleSize >> IMMIX_LINE_BITS;
             if (key>=KEYS)
@@ -7248,6 +7483,10 @@ public:
       //  sorted path.
       for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
          mNextFreeBlockOfSize[i] = counts[i];
+      #ifdef HXCPP_GC_CONCURRENT
+      sgFreeListLines = listedLines;
+      sgFreeListClaimedLines = 0;
+      #endif
 
       for(int i=0;i<total;i++)
       {
@@ -8562,6 +8801,14 @@ void InitAlloc()
    if (HXCPP_GC_CONCURRENT_TRIGGER>0.1 && HXCPP_GC_CONCURRENT_TRIGGER<0.95)
       sgConcurrentTriggerRatio = HXCPP_GC_CONCURRENT_TRIGGER;
    #endif
+   #ifdef HXCPP_GC_CONCURRENT_HEAP_FACTOR
+   if (HXCPP_GC_CONCURRENT_HEAP_FACTOR>=0 && HXCPP_GC_CONCURRENT_HEAP_FACTOR<100)
+      sgHeapFactor = HXCPP_GC_CONCURRENT_HEAP_FACTOR;
+   #endif
+   #ifdef HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB
+   if (HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB>=0 && HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB<65536)
+      sgHeapMargin = (size_t)(HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB)*1024*1024;
+   #endif
    #ifdef HXCPP_GC_CONCURRENT_NURSERY_MB
    if (HXCPP_GC_CONCURRENT_NURSERY_MB>0 && HXCPP_GC_CONCURRENT_NURSERY_MB<4096)
       sgConcurrentNurseryBudget = (size_t)(HXCPP_GC_CONCURRENT_NURSERY_MB)*1024*1024;
@@ -8587,6 +8834,20 @@ void InitAlloc()
       sgConcurrentVerbose = true;
    if (getenv("HXCPP_GC_CONCURRENT_VERIFY"))
       sgConcurrentVerify = true;
+   if (const char *factor = getenv("HXCPP_GC_CONCURRENT_HEAP_FACTOR"))
+   {
+      double f = atof(factor);
+      if (f>=0 && f<100)
+         sgHeapFactor = f;
+   }
+   if (const char *margin = getenv("HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB"))
+   {
+      int mb = atoi(margin);
+      if (mb>=0 && mb<65536)
+         sgHeapMargin = (size_t)mb*1024*1024;
+   }
+   if (const char *release = getenv("HXCPP_GC_CONCURRENT_HEAP_RELEASE"))
+      sgHeapRelease = atoi(release)!=0;
    if (const char *nursery = getenv("HXCPP_GC_CONCURRENT_NURSERY_MB"))
    {
       int mb = atoi(nursery);
@@ -9042,6 +9303,11 @@ double __hxcpp_gc_mem_info(int inWhich)
       case 119: return (double)sgNurseryCapacity;
       #endif
       case 120: return (double)sgLastFullLiveBytes;
+      #ifdef HXCPP_GC_CONCURRENT
+      case 121: return (double)sgHeapGoal;
+      case 122: return (double)sgHeapLimitWaits;
+      case 123: return (double)sgHeapReleasedBytes;
+      #endif
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:
