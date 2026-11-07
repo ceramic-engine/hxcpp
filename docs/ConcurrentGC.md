@@ -250,7 +250,7 @@ Short-lived allocation rate: ~285 M allocs/s in both.
 
 ### Minor pause (2026-11-01, M4 Max, other builds running: load 4 to 10)
 
-GPUI port bench (`ceramic-gpui/test/bench`, default Ceramic build with the
+Glaze bench (`ceramic/plugins/glaze/tests/bench`, then named the GPUI port bench; default Ceramic build with the
 hxcpp checks, 300 frames x 3 runs x 3 alternating processes, the same
 generated C++ linked against each hxcpp; medians):
 
@@ -300,8 +300,8 @@ frame difference.
 
 ### Heap growth during concurrent cycles (2026-11-02, M4 Max, load 7 to 40: other builds running)
 
-Measured with the soak mode of the GPUI port bench (`GPUI_BENCH_SOAK_SECONDS`
-in `ceramic-gpui/test/bench`: memory sampled every 5 s for 30 minutes, the
+Measured with the soak mode of the Glaze bench (`GLAZE_BENCH_SOAK_SECONDS`,
+then `GPUI_BENCH_SOAK_SECONDS`, in `ceramic/plugins/glaze/tests/bench`: memory sampled every 5 s for 30 minutes, the
 live size after `Gc.run(true)` every minute), default Ceramic build:
 
 | Scenario (30 min) | live (memInfo 120 + large) | reserved after 3 min | after 30 min | process RSS |
@@ -333,8 +333,8 @@ growing. What grows it (counted per growth site, cards full, 30 s):
   blocks claimed for 7 MB of allocation during one cycle, and remark stops
   of 1.5 to 3.6 ms waiting for that thread.
 
-First attempts (2026-11-02, load 7 to 40) are in the ceramic-gpui plan
-(`docs/perf/HEAP_GROWTH.md`). What was kept is the bound described in "Heap
+First attempts (2026-11-02, load 7 to 40) are in the Glaze working notes
+(`docs/perf/HEAP_GROWTH.md` of glaze-golden). What was kept is the bound described in "Heap
 bound" above, measured on 2026-11-03 against the collector before it (A),
 same generated C++, alternated A/B runs, load 3 to 5:
 
