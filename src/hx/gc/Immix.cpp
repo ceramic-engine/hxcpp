@@ -584,6 +584,8 @@ MID = HX_ENDIAN_MARK_ID_BYTE = is measured from the object pointer
 
 // Bigger than this, and they go in the large object pool
 #define IMMIX_LARGE_OBJ_SIZE 4000
+// The largest object size the size field of a block object header can hold
+#define IMMIX_MAX_BLOCK_OBJ_SIZE (IMMIX_ALLOC_SIZE_MASK >> IMMIX_ALLOC_SIZE_SHIFT)
 
 #ifdef allocString
 #undef allocString
@@ -8941,7 +8943,11 @@ void *InternalNew(int inSize,bool inIsObject)
    _hx_atomic_add(&sgAllocsSinceLastSpam, 1);
    #endif
 
-   if (inSize>=IMMIX_LARGE_OBJ_SIZE)
+   // A class instance (cppia scriptable classes and closures come here) is a block
+   //  object up to the largest size a block header can hold, like a compiled class
+   //  (ImmixAllocator::alloc never makes a large alloc). The marker only traces
+   //  block objects: as a large alloc, its fields would never be marked.
+   if (inSize>=IMMIX_LARGE_OBJ_SIZE && !(inIsObject && inSize<=IMMIX_MAX_BLOCK_OBJ_SIZE))
    {
       void *result = sGlobalAlloc->AllocLarge(inSize, true);
       return result;

@@ -1,0 +1,4 @@
+-m LargeInstanceClient
+-D dll_import=large_host_classes.info
+--dce no
+--cppia bin/large-client.cppia

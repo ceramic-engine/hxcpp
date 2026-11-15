@@ -1,0 +1,8 @@
+-m LargeInstanceHost
+LargeInstanceTypes
+-D scriptable
+-D dll_export=large_host_classes.info
+-D HXCPP_CPP17
+-D hxcpp_static_std
+--dce no
+--cpp bin/largehost

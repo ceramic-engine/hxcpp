@@ -88,6 +88,12 @@ class RunTests
       command("haxe", ["compile-client.hxml"] );
       command("bin" + sep + "CppiaHost",[ "bin" + sep + "client.cppia" ]);
       command("bin" + sep + "CppiaHost",[ "bin" + sep + "client.cppia", "-jit" ]);
+
+      // Large class instances made by a script must be traced by the GC
+      command("haxe", ["compile-largehost.hxml"] );
+      command("haxe", ["compile-largeclient.hxml"] );
+      command("bin" + sep + "largehost" + sep + "LargeInstanceHost",[ "bin" + sep + "large-client.cppia" ]);
+      command("bin" + sep + "largehost" + sep + "LargeInstanceHost",[ "bin" + sep + "large-client.cppia", "-jit" ]);
    }
 
    public static function native()
