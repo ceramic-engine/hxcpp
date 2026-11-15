@@ -2181,7 +2181,12 @@ void ConcurrentGcShade(void *inValue, hx::StackContext *inCtx)
       // Zero mark byte: pre-cycle nursery alloc, or a stale view of an
       //  allocate-black object (which is already live - the byte write below
       //  then just re-writes the same value).
-      if (!header)
+      // A zero size field means a large alloc, as in MarkAllocUnchecked: its
+      //  header can still carry the IMMIX_HEADER_PRESERVE flags (a UTF-16 or
+      //  hashed string), so testing the whole header is not enough. Such an
+      //  alloc is not in an Immix block and must never reach the block lookup
+      //  below (it read a block id from the memory around the string).
+      if (!(header & 0xffff))
       {
          // Large nursery alloc (size lives at [-2]) or stale-black zeros
          ((unsigned char *)inValue)[HX_ENDIAN_MARK_ID_BYTE] = (unsigned char)gByteMarkID;
