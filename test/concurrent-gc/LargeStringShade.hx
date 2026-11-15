@@ -72,6 +72,12 @@ class LargeStringShade {
       return hide(text);
    }
 
+   // Called through a function value: the C++ compiler cannot inline it into
+   //  main, where the string would stay in a register or a stack slot that the
+   //  conservative stack scan finds (the markers then mark the string before
+   //  the barrier meets it, and the test is not exercised)
+   static var hiddenMaker:(Int, Int) -> cpp.Int64 = makeHidden;
+
    // Overwrites the stack area the call above used
    static function scrub():Int {
       var a = [for (i in 0...64) i];
@@ -102,7 +108,7 @@ class LargeStringShade {
          // Out of any cycle, so that the string is a large nursery alloc
          var guard = 0;
          while (markActive() && guard++ < 50000000) churn();
-         var hidden = makeHidden(chars, round);
+         var hidden = hiddenMaker(chars, round);
          if (hidden == (0:cpp.Int64)) {
             // allocated black or already promoted: not the case under test
             continue;
@@ -140,7 +146,8 @@ class LargeStringShade {
          if (t.length != chars || t.charCodeAt(0) != 0xe9) throw 'bad text in holder $i';
       }
       Sys.println('cycles=$cycles barrier hits on unmarked large UTF-16 strings=$hits');
-      if (hits == 0) Sys.println("LARGE STRING SHADE NOT EXERCISED");
+      // A run that never met the case tests nothing: fail it
+      if (hits == 0) { Sys.println("LARGE STRING SHADE NOT EXERCISED"); Sys.exit(1); }
       else Sys.println("LARGE STRING SHADE OK");
    }
 }

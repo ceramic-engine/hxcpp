@@ -2,6 +2,8 @@
 # Correctness + benchmark suite for -D HXCPP_GC_CONCURRENT
 # Usage: ./run.sh            (build + run everything)
 set -e
+# A failing test piped into tail must stop the suite too
+set -o pipefail
 cd "$(dirname "$0")"
 
 GEN="-D HXCPP_GC_GENERATIONAL"
@@ -22,6 +24,7 @@ haxe -main GameBench -cp . -cpp bin/bench-conc    $FUT
 haxe -main RemarkStorm -cp . -cpp bin/storm-conc  $FUT
 haxe -main HeapBound -cp . -cpp bin/heapbound-conc  $FUT -D HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB=32
 haxe -main LargeStringShade -cp . -cpp bin/largestring-conc  $FUT
+haxe -main LargeObjectShade -cp . -cpp bin/largeobject-conc  $FUT
 
 echo "== correctness =="
 bin/smoke-gen/Smoke   | tail -1
@@ -30,7 +33,8 @@ bin/stress-gen/Stress | tail -1
 for i in 1 2 3; do bin/stress-conc/Stress 1200 | tail -1; done
 HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS=0.5 bin/storm-conc/RemarkStorm | tail -1
 bin/heapbound-conc/HeapBound | tail -2
-HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/largestring-conc/LargeStringShade | tail -1
+HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/largestring-conc/LargeStringShade | tail -2
+HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/largeobject-conc/LargeObjectShade | tail -2
 
 echo "== benchmarks (classic vs concurrent) =="
 echo "-- trees --";      bin/trees-gen/Trees 19 | grep time;  bin/trees-conc/Trees 19 | grep time
