@@ -25,6 +25,7 @@ haxe -main RemarkStorm -cp . -cpp bin/storm-conc  $FUT
 haxe -main HeapBound -cp . -cpp bin/heapbound-conc  $FUT -D HXCPP_GC_CONCURRENT_HEAP_MARGIN_MB=32
 haxe -main LargeStringShade -cp . -cpp bin/largestring-conc  $FUT
 haxe -main LargeObjectShade -cp . -cpp bin/largeobject-conc  $FUT
+haxe -main ArrayResizeRace -cp . -cpp bin/arrayrace-conc  $FUT
 
 echo "== correctness =="
 bin/smoke-gen/Smoke   | tail -1
@@ -35,6 +36,7 @@ HXCPP_GC_CONCURRENT_REMARK_BUDGET_MS=0.5 bin/storm-conc/RemarkStorm | tail -1
 bin/heapbound-conc/HeapBound | tail -2
 HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/largestring-conc/LargeStringShade | tail -2
 HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/largeobject-conc/LargeObjectShade | tail -2
+HXCPP_GC_CONCURRENT_TRIGGER=0.15 bin/arrayrace-conc/ArrayResizeRace 20 | tail -2
 
 echo "== benchmarks (classic vs concurrent) =="
 echo "-- trees --";      bin/trees-gen/Trees 19 | grep time;  bin/trees-conc/Trees 19 | grep time

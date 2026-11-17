@@ -141,6 +141,8 @@ void ArrayBase::reserve(int inSize) const
          #endif
       }
 
+      // New buffer visible before the larger sizes, see readForMark
+      storeBufferFence();
       mAlloc = inSize;
       HX_OBJ_WB_GET(const_cast<ArrayBase *>(this),mBase);
       // Old elements were bulk-copied without barriers
@@ -198,6 +200,8 @@ void ArrayBase::Realloc(int inSize) const
          #endif
       }
 
+      // New buffer visible before the larger sizes, see readForMark
+      storeBufferFence();
       mAlloc = bytes/elemSize;
       HX_OBJ_WB_GET(const_cast<ArrayBase *>(this),mBase);
       // Old elements were bulk-copied without barriers
@@ -292,41 +296,53 @@ void ArrayBase::__SetSizeExact(int inSize)
 {
    if (inSize==0)
    {
-      InternalReleaseMem(mBase);
-      mBase = 0;
+      // Sizes cleared before the buffer, see readForMark
+      char *oldBase = mBase;
       mAlloc = length = 0;
+      storeBufferFence();
+      mBase = 0;
+      InternalReleaseMem(oldBase);
    }
    else if (inSize!=length || inSize!=mAlloc)
    {
       int elemSize = GetElementSize();
       int bytes = inSize * elemSize;
+      char *newBase;
       if (mBase)
       {
          bool wasUnamanaged = mAlloc<0;
 
          if (wasUnamanaged)
          {
-            char *base=(char *)(AllocAtomic() ? hx::NewGCPrivate(0,bytes) : hx::NewGCBytes(0,bytes));
-            memcpy(base,mBase,std::min(length,inSize)*elemSize);
-            mBase = base;
+            newBase=(char *)(AllocAtomic() ? hx::NewGCPrivate(0,bytes) : hx::NewGCBytes(0,bytes));
+            memcpy(newBase,mBase,std::min(length,inSize)*elemSize);
          }
          else
-            mBase = (char *)hx::InternalRealloc(length*elemSize,mBase, bytes );
+            newBase = (char *)hx::InternalRealloc(length*elemSize,mBase, bytes );
       }
       else if (AllocAtomic())
       {
-         mBase = (char *)hx::NewGCPrivate(0,bytes);
+         newBase = (char *)hx::NewGCPrivate(0,bytes);
 #ifdef HXCPP_TELEMETRY
-         __hxt_new_array(mBase, bytes);
+         __hxt_new_array(newBase, bytes);
 #endif
       }
       else
       {
-         mBase = (char *)hx::NewGCBytes(0,bytes);
+         newBase = (char *)hx::NewGCBytes(0,bytes);
 #ifdef HXCPP_TELEMETRY
-         __hxt_new_array(mBase, bytes);
+         __hxt_new_array(newBase, bytes);
 #endif
       }
+      // A smaller size is visible before the new buffer, the new buffer before a
+      //  larger size, see readForMark
+      if (inSize<length)
+      {
+         length = inSize;
+         storeBufferFence();
+      }
+      mBase = newBase;
+      storeBufferFence();
       mAlloc = length = inSize;
       HX_OBJ_WB_GET(this,mBase);
       HX_OBJ_WB_CONCURRENT_BULK(this);

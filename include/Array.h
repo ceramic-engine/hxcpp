@@ -1,6 +1,9 @@
 #ifndef HX_ARRAY_H
 #define HX_ARRAY_H
 #include <cpp/FastIterator.h>
+#ifdef HXCPP_GC_CONCURRENT
+#include <atomic>
+#endif
 
 // --- hx::ReturnNull ------------------------------------------------------
 //
@@ -203,17 +206,24 @@ public:
 
    void setData(void *inData, int inElements)
    {
+      // Sizes of the old buffer cleared before the buffer changes, see readForMark
+      length = 0;
+      storeBufferFence();
       mBase = (char *)inData;
-      length = inElements;
       mAlloc = inElements;
+      storeBufferFence();
+      length = inElements;
       HX_OBJ_WB_PESSIMISTIC_GET(this);
    }
 
    void setUnmanagedData(void *inData, int inElements)
    {
-      mBase = (char *)inData;
-      length = inElements;
+      length = 0;
       mAlloc = -1;
+      storeBufferFence();
+      mBase = (char *)inData;
+      storeBufferFence();
+      length = inElements;
    }
 
 
@@ -255,9 +265,14 @@ public:
 
    inline void __unsafeStringReference(String inString)
    {
+      int newLength = inString.length / GetElementSize();
+      // Sizes of the old buffer cleared before the buffer changes, see readForMark
+      length = 0;
+      storeBufferFence();
       mBase = (char *)inString.raw_ptr();
-      length = inString.length / GetElementSize();
-      mAlloc = length;
+      mAlloc = newLength;
+      storeBufferFence();
+      length = newLength;
       HX_OBJ_WB_PESSIMISTIC_GET(this);
    }
 
@@ -396,6 +411,36 @@ public:
    static inline int baseOffset() { return (int)offsetof(ArrayBase,mBase); }
    static inline int allocOffset() { return (int)offsetof(ArrayBase,mAlloc); }
    static inline int lengthOffset() { return (int)offsetof(ArrayBase,length); }
+
+   #ifdef HXCPP_GC_CONCURRENT
+   // The concurrent markers read an array while the mutator may resize it, and
+   //  the stores of mBase, mAlloc and length may be seen in any order (weak
+   //  memory ordering of ARM, for instance). The mutator stores the new buffer
+   //  before a larger size, and a smaller size before the new buffer, with a
+   //  release fence in between (see storeBufferFence). Here mBase is read before
+   //  and after the sizes: if it did not change, the sizes match that buffer.
+   inline void readForMark(char *&outBase, int &outLength, int &outAlloc) const
+   {
+      while(true)
+      {
+         char *base = *(char * volatile *)&mBase;
+         std::atomic_thread_fence(std::memory_order_acquire);
+         int len = *(volatile int *)&length;
+         int alloc = *(volatile int *)&mAlloc;
+         std::atomic_thread_fence(std::memory_order_acquire);
+         if (*(char * volatile *)&mBase == base)
+         {
+            outBase = base;
+            outLength = len;
+            outAlloc = alloc;
+            return;
+         }
+      }
+   }
+   static inline void storeBufferFence() { std::atomic_thread_fence(std::memory_order_release); }
+   #else
+   static inline void storeBufferFence() { }
+   #endif
 
 protected:
    mutable int mAlloc;
@@ -637,12 +682,29 @@ public:
 
    void __Mark(hx::MarkContext *__inCtx) HXCPP_OVERRIDE
    {
+      #ifdef HXCPP_GC_CONCURRENT
+      // Buffer and sizes read together: the mutator may resize the array while
+      //  a concurrent marker reads it
+      char *base;
+      int len;
+      int alloc;
+      readForMark(base, len, alloc);
+      if (!base)
+         return;
+      if (alloc>0) hx::MarkAlloc((void *)base, __inCtx );
+      if (len && hx::ContainsPointers<ELEM_>())
+      {
+         ELEM_ *ptr = (ELEM_ *)base;
+         HX_MARK_MEMBER_ARRAY(ptr,len);
+      }
+      #else
       if (mAlloc>0) hx::MarkAlloc((void *)mBase, __inCtx );
       if (length && hx::ContainsPointers<ELEM_>())
       {
          ELEM_ *ptr = (ELEM_ *)mBase;
          HX_MARK_MEMBER_ARRAY(ptr,length);
       }
+      #endif
    }
 
    #ifdef HXCPP_VISIT_ALLOCS
