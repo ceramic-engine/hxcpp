@@ -275,7 +275,9 @@ jobs:
 
   concurrent_gc:
     # Correctness suite of the concurrent GC. Arm64 matters most: its weak memory
-    # order exposes races that x86 hides (ArrayResizeRace only fails there).
+    # order exposes races that x86 hides (in ArrayResizeRace, the first element
+    # added to an empty array). Other races, such as an array emptied while it is
+    # marked, can happen on any architecture.
     if: inputs.os != 'windows-latest' && (inputs.arch == '64' || inputs.arch == 'Arm64')
     runs-on: ${{ inputs.os }}
     name: concurrent gc
