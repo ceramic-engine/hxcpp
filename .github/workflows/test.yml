@@ -272,3 +272,26 @@ jobs:
           haxe: ${{ inputs.haxe }}
       - name: run
         run: haxe --run Run -D ${{ env.HXCPP_ARCH_FLAG }}
+
+  concurrent_gc:
+    # Correctness suite of the concurrent GC. Arm64 matters most: its weak memory
+    # order exposes races that x86 hides (ArrayResizeRace only fails there).
+    if: inputs.os != 'windows-latest' && (inputs.arch == '64' || inputs.arch == 'Arm64')
+    runs-on: ${{ inputs.os }}
+    name: concurrent gc
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: test/concurrent-gc
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup
+        uses: ./.github/workflows/setup
+        with:
+          haxe: ${{ inputs.haxe }}
+      - name: build and run
+        shell: bash
+        env:
+          HXCPP_TEST_DEFINES: -D ${{ env.HXCPP_ARCH_FLAG }}
+        run: ./run.sh correctness
