@@ -695,7 +695,17 @@ public:
       if (len && hx::ContainsPointers<ELEM_>())
       {
          ELEM_ *ptr = (ELEM_ *)base;
-         HX_MARK_MEMBER_ARRAY(ptr,len);
+         if (alloc<0)
+         {
+            // Unmanaged buffer (setUnmanagedData): there is no gc header in
+            //  front of it for the array marker to bound its scan with
+            for(int i=0;i<len;i++)
+               HX_MARK_MEMBER(ptr[i]);
+         }
+         else
+         {
+            HX_MARK_MEMBER_ARRAY(ptr,len);
+         }
       }
       #else
       if (mAlloc>0) hx::MarkAlloc((void *)mBase, __inCtx );
@@ -960,6 +970,17 @@ public:
 
    inline void qsort(SorterFunc inSorter)
    {
+      #ifdef HXCPP_GC_CONCURRENT
+      // The sorter can allocate, so a whole concurrent cycle can run while
+      //  std::sort moves references around: sort indices instead, as sort does
+      if ( (int)hx::ArrayTraits<ELEM_>::StoreType==(int)hx::arrayObject ||
+          (int)hx::ArrayTraits<ELEM_>::StoreType==(int)hx::arrayString)
+      {
+         safeSort(inSorter, (int)hx::ArrayTraits<ELEM_>::StoreType==(int)hx::arrayString);
+         HX_OBJ_WB_CONCURRENT_BULK(this);
+         return;
+      }
+      #endif
       ELEM_ *e = (ELEM_ *)mBase;
       std::sort(e, e+length, Sorter(inSorter) );
       if (hx::ContainsPointers<ELEM_>())

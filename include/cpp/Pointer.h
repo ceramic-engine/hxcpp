@@ -199,6 +199,19 @@ public:
 
 
 
+// A store through a raw pointer has no owner object for a write barrier. While a
+//  concurrent mark runs, the stored reference is at least shaded, so that the
+//  marker cannot miss it (the generational remembered set is not updated)
+#ifdef HXCPP_GC_CONCURRENT
+   #define HX_POINTER_STORE_SHADE(lvalue) \
+      if (::hx::gConcurrentGcMarkActive) { \
+         const void *_hx_stored = ::hx::PointerOf(lvalue); \
+         HX_GC_CONCURRENT_SHADE_CTX(_hx_stored,HX_CTX_GET) \
+      }
+#else
+   #define HX_POINTER_STORE_SHADE(lvalue)
+#endif
+
 template<typename T>
 class Pointer
 {
@@ -266,10 +279,10 @@ public:
  	inline T &postIncVal() { return *ptr++; }
 
    inline T &at(int inIndex) { return ptr[inIndex]; }
-   inline void setAt(int inIndex, const T &test) { ptr[inIndex] = test; }
+   inline void setAt(int inIndex, const T &test) { ptr[inIndex] = test; HX_POINTER_STORE_SHADE(ptr[inIndex]) }
 
    inline T &__get(int inIndex) { return ptr[inIndex]; }
-   inline T &__set(int inIndex, const T &inValue) { T *p = ptr+inIndex; *p = inValue; return *p; }
+   inline T &__set(int inIndex, const T &inValue) { T *p = ptr+inIndex; *p = inValue; HX_POINTER_STORE_SHADE(*p) return *p; }
 
    inline T &get_value() { return *ptr; }
    inline T &get_ref() { return *ptr; }

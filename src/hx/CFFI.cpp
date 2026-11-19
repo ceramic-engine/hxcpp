@@ -127,6 +127,7 @@ public:
       if (inName==HX_CSTRING("_hxcpp_toString"))
       {
          _hxcpp_toString = inValue;
+         HX_OBJ_WB_GET(this, _hxcpp_toString.mPtr);
          return inValue;
       }
       return hx::Object::__SetField(inName, inValue,inCallProp);

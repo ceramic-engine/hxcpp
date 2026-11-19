@@ -970,6 +970,9 @@ struct BlockDataInfo
    #ifdef HXCPP_GC_CONCURRENT
    // Epoch at which this block was last claimed by an allocator
    int          mConcurrentOwnEpoch;
+   // A scrubbing sweep had to skip this block: scrub it in the next sweep
+   //  that finds it quiesced, without waiting for the next scrubbing cycle
+   bool         mConcurrentScrubPending;
    #endif
    volatile int mZeroLock;
 
@@ -1000,6 +1003,7 @@ struct BlockDataInfo
       mOwned = false;
       #ifdef HXCPP_GC_CONCURRENT
       mConcurrentOwnEpoch = 0;
+      mConcurrentScrubPending = false;
       #endif
       mGroupId = inGid;
       mPtr     = inData;
@@ -7106,11 +7110,16 @@ public:
                for(int r=IMMIX_HEADER_LINES;r<IMMIX_LINES;r++)
                   used += rowMarked[r];
                outStats.rowsInUse += used;
+               // Its stale alloc-start data must still go before the mark id
+               //  wraps (only the sweeper thread uses this flag)
+               if (inScrub)
+                  info->mConcurrentScrubPending = true;
                std::atomic_thread_fence(std::memory_order_release);
                info->mZeroLock = 0;
             }
-            else if (inScrub)
+            else if (inScrub || info->mConcurrentScrubPending)
             {
+               info->mConcurrentScrubPending = false;
                // Periodic full reclaim: scrubs stale alloc-start data before
                //  the 4-bit mark id wraps (conservative-scan safety).  Only
                //  safe on quiesced blocks: claimed-since-remark blocks can
@@ -7308,6 +7317,9 @@ public:
             //  shorter pause publishes the fresh free lists.  Every ~15th
             //  cycle the sweep performs a full reclaim per block, scrubbing
             //  stale alloc-start data before the 4-bit mark id wraps.
+            // A block claimed by an allocator during that sweep is skipped and
+            //  scrubbed by a later one (mConcurrentScrubPending), which must
+            //  also come before the wrap: hence 14 cycles and not 15.
             sgTimeToNextTableUpdate--;
             bool scrub = sgTimeToNextTableUpdate<=0;
             if (scrub)
@@ -7315,7 +7327,7 @@ public:
                #ifdef HXCPP_GC_MOVING
                sgTimeToNextTableUpdate = 7;
                #else
-               sgTimeToNextTableUpdate = 15;
+               sgTimeToNextTableUpdate = 14;
                #endif
             }
 
@@ -8273,6 +8285,9 @@ public:
       VerifyStackRead(mBottomOfStack, mTopOfStack)
       #endif
 
+      // The stack extent and the registers captured above are read by the
+      //  collecting thread as soon as it sees the flag
+      std::atomic_thread_fence(std::memory_order_release);
       mGCFreeZone = true;
       mReadyForCollect.Set();
       #endif
@@ -8354,6 +8369,11 @@ public:
          spaceEnd = 0;
          #endif
          mReadyForCollect.Wait();
+      }
+      else
+      {
+         // See EnterGCFreeZone
+         std::atomic_thread_fence(std::memory_order_acquire);
       }
       #endif
    }
@@ -9113,6 +9133,14 @@ void *InternalRealloc(int inFromSize, void *inData,int inSize, bool inExpand)
 
    if (min_size)
       memcpy(new_data, inData, min_size );
+
+   #ifdef HXCPP_GC_CONCURRENT
+   // The caller publishes the new buffer with a plain store: its content must
+   //  be visible first, or a racing marker could read what a recycled large
+   //  allocation held before the copy
+   if (hx::gConcurrentGcMarkActive)
+      std::atomic_thread_fence(std::memory_order_release);
+   #endif
 
    InternalReleaseMem(inData);
 

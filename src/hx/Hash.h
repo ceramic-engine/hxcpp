@@ -429,6 +429,10 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       int origSize = bucketCount;
       int newSize = bucketCount>>1;
       // printf("compact -> %d\n", newSize);
+      // The chains are merged without barriers, and the reallocation below is
+      //  a safe point: the re-scan must already be requested if the remark
+      //  pause happens there
+      HX_OBJ_WB_CONCURRENT_BULK(this);
       mask = newSize-1;
       for(int b=newSize; b<bucketCount; b++)
       {
@@ -603,6 +607,11 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       el->setKey(inKey,hash);
       CopyValue(el->value,inValue);
       el->next = bucket[hash&mask];
+      #ifdef HXCPP_GC_CONCURRENT
+      // A concurrent marker walks the chain from the bucket: the element must
+      //  be complete (its next pointer above all) before it can be reached
+      std::atomic_thread_fence(std::memory_order_release);
+      #endif
       bucket[hash&mask] = el;
 
       #ifdef HXCPP_GC_GENERATIONAL

@@ -128,6 +128,8 @@ void ArrayBase::reserve(int inSize) const
          {
             char *base=(char *)hx::InternalNew(bytes,false);
             memcpy(base,mBase,length*elemSize);
+            // Copy visible before the buffer (InternalRealloc does the same)
+            storeBufferFence();
             mBase = base;
          }
          else
@@ -183,6 +185,8 @@ void ArrayBase::Realloc(int inSize) const
          {
             char *base=(char *)hx::InternalNew(bytes,false);
             memcpy(base,mBase,length*elemSize);
+            // Copy visible before the buffer (InternalRealloc does the same)
+            storeBufferFence();
             mBase = base;
          }
          else
