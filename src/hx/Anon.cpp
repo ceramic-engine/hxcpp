@@ -1,4 +1,8 @@
 #include <hxcpp.h>
+#ifdef HXCPP_GC_CONCURRENT
+#include <atomic>
+#include <thread>
+#endif
 #undef RegisterClass
 namespace hx
 {
@@ -71,8 +75,141 @@ Anon_obj::Anon_obj(int inElements)
    //mFields = hx::FieldMapCreate();
 }
 
+#ifdef HXCPP_GC_CONCURRENT
+// A fixed field is a cpp::Variant: a type and a value, in two words. A write
+//  that changes the type, or that moves fields (__Remove), is not atomic for a
+//  concurrent marker, which could then read a type with the value of another
+//  one and follow a number as a pointer.
+// Such writes are bracketed by a sequence lock while a concurrent mark is
+//  active, and the marker retries until it reads a stable view. The locks are
+//  striped by object address, and are never held across a safe point, so they
+//  are all free inside a stop-the-world pause.
+#if defined(_MSC_VER)
+   #define HXCPP_NOINLINE_ANON __declspec(noinline)
+#else
+   #define HXCPP_NOINLINE_ANON __attribute__((noinline))
+#endif
+
+namespace
+{
+enum { ANON_SEQ_STRIPES = 256 };
+std::atomic<unsigned int> sAnonSeq[ANON_SEQ_STRIPES];
+
+inline std::atomic<unsigned int> &anonSeq(const void *inObj)
+{
+   return sAnonSeq[ (((size_t)inObj)>>4) * (size_t)0x9E3779B1 >> 16 & (ANON_SEQ_STRIPES-1) ];
+}
+
+inline void anonSpinPause(int &ioSpins)
+{
+   if (++ioSpins > 64)
+   {
+      std::this_thread::yield();
+      ioSpins = 0;
+   }
+}
+
+struct AnonWriteLock
+{
+   std::atomic<unsigned int> *seq;
+   unsigned int value;
+
+   inline AnonWriteLock(const void *inObj) : seq(0), value(0)
+   {
+      if (hx::gConcurrentGcMarkActive)
+      {
+         seq = &anonSeq(inObj);
+         int spins = 0;
+         while(true)
+         {
+            value = seq->load(std::memory_order_relaxed);
+            if (!(value&1) && seq->compare_exchange_weak(value,value+1))
+               break;
+            anonSpinPause(spins);
+         }
+         // The odd sequence is visible before the writes that follow
+         std::atomic_thread_fence(std::memory_order_seq_cst);
+      }
+   }
+   inline ~AnonWriteLock()
+   {
+      if (seq)
+         seq->store(value+2, std::memory_order_release);
+   }
+};
+
+// Out of line: keeps the lock out of the common path of __SetField
+HXCPP_NOINLINE_ANON void anonSetChangingType(const void *inObj, cpp::Variant *ioField, const cpp::Variant &inValue)
+{
+   AnonWriteLock lock(inObj);
+   *ioField = inValue;
+}
+
+struct AnonFieldSnapshot
+{
+   void *ptr;
+   int  type;
+};
+}
+#endif
+
 void Anon_obj::__Mark(hx::MarkContext *__inCtx)
 {
+   #ifdef HXCPP_GC_CONCURRENT
+   if (hx::gConcurrentGcMarkActive)
+   {
+      enum { CHUNK = 16 };
+      AnonFieldSnapshot snapshot[CHUNK];
+      std::atomic<unsigned int> &seq = anonSeq(this);
+      volatile VariantKey *fixed = getFixed();
+      int first = 0;
+      while(true)
+      {
+         int n = 0;
+         int spins = 0;
+         while(true)
+         {
+            unsigned int s0 = seq.load(std::memory_order_acquire);
+            if (!(s0&1))
+            {
+               // The count only ever decreases (__Remove)
+               n = *(volatile int *)&mFixedFields - first;
+               if (n>CHUNK)
+                  n = CHUNK;
+               if (n<0)
+                  n = 0;
+               for(int i=0;i<n;i++)
+               {
+                  snapshot[i].type = (int)fixed[first+i].value.type;
+                  snapshot[i].ptr = (void *)fixed[first+i].value.valObject;
+               }
+               std::atomic_thread_fence(std::memory_order_acquire);
+               if (seq.load(std::memory_order_relaxed)==s0)
+                  break;
+            }
+            anonSpinPause(spins);
+         }
+         for(int i=0;i<n;i++)
+         {
+            if (snapshot[i].type==cpp::Variant::typeObject)
+            {
+               hx::Object *obj = (hx::Object *)snapshot[i].ptr;
+               HX_MARK_OBJECT(obj);
+            }
+            else if (snapshot[i].type==cpp::Variant::typeString)
+            {
+               HX_MARK_STRING(snapshot[i].ptr);
+            }
+         }
+         if (n<CHUNK)
+            break;
+         first += n;
+      }
+      HX_MARK_MEMBER(mFields);
+      return;
+   }
+   #endif
+
    if (mFixedFields)
    {
       VariantKey *fixed = getFixed();
@@ -241,12 +378,22 @@ bool Anon_obj::__Remove(String inKey)
    if (slot>=0)
    {
       VariantKey *fixed = getFixed();
-      while(slot<mFixedFields)
+      // The last field has no successor to copy from
+      int last = mFixedFields-1;
       {
-         fixed[slot] = fixed[slot+1];
-         slot++;
+         #ifdef HXCPP_GC_CONCURRENT
+         AnonWriteLock lock(this);
+         #endif
+         while(slot<last)
+         {
+            fixed[slot] = fixed[slot+1];
+            slot++;
+         }
+         mFixedFields = last;
       }
-      mFixedFields--;
+      // A concurrent marker scans the fields in several steps, and may miss a
+      //  value that moved down between two of them
+      HX_OBJ_WB_CONCURRENT_BULK(this);
       return true;
    }
 
@@ -263,6 +410,12 @@ hx::Val Anon_obj::__SetField(const String &inName,const hx::Val &inValue, hx::Pr
    {
       #ifdef HXCPP_GC_GENERATIONAL
       VariantKey *fixed = getFixed() + slot;
+      #ifdef HXCPP_GC_CONCURRENT
+      // Same type: the marker reads the old or the new pointer, both valid
+      if (hx::gConcurrentGcMarkActive && fixed->value.type!=inValue.type)
+         anonSetChangingType(this, &fixed->value, inValue);
+      else
+      #endif
       fixed->value=inValue;
       if (fixed->value.type <= cpp::Variant::typeString)
          HX_OBJ_WB_GET(this, fixed->value.valObject);
