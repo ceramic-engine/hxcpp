@@ -137,6 +137,8 @@
    } // end namespace hx
 
 
+   // With HX_TLS_NATIVE, the thread-local versions defined below are used instead
+   #ifndef HX_TLS_NATIVE
    #define DECLARE_TLS_DATA(TYPE,NAME) \
       ::hx::TLSData<TYPE> NAME;
    #define DECLARE_FAST_TLS_DATA(TYPE,NAME) \
@@ -145,6 +147,7 @@
       extern ::hx::TLSData<TYPE> NAME;
    #define EXTERN_FAST_TLS_DATA(TYPE,NAME) \
       extern ::hx::TLSData<TYPE,true> NAME;
+   #endif
 
 
   #endif
